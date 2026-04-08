@@ -440,7 +440,7 @@ fn pythonListFromNodeHandles nodes =
 	out
 )
 
-fn exportUsdViaPythonBridge filePath nodes startFrame endFrame fps =
+fn exportUsdViaPythonBridge filePath nodes startFrame endFrame fps forceMaterialXSidecar:false =
 (
 	local bridgeDir = if g_PowerUSD_HierarchyBuilderDir != undefined and g_PowerUSD_HierarchyBuilderDir != "" then g_PowerUSD_HierarchyBuilderDir else ""
 	if bridgeDir == "" and isFunction ::PowerUSD_getScriptsDir do bridgeDir = (::PowerUSD_getScriptsDir() + "cloneTools\\")
@@ -469,6 +469,7 @@ fn exportUsdViaPythonBridge filePath nodes startFrame endFrame fps =
 	python.Execute ("import pymxs; pymxs.runtime._powerusd_export_start_frame = " + ((startFrame as integer) as string))
 	python.Execute ("import pymxs; pymxs.runtime._powerusd_export_end_frame = " + ((endFrame as integer) as string))
 	python.Execute ("import pymxs; pymxs.runtime._powerusd_export_fps = " + ((fps as integer) as string))
+	python.Execute ("import pymxs; pymxs.runtime._powerusd_force_materialx_sidecar = " + (if forceMaterialXSidecar then "True" else "False"))
 	python.Execute "import pymxs; pymxs.runtime.g_PowerUSD_PythonExportOk = False; pymxs.runtime.g_PowerUSD_PythonExportError = ''"
 
 	try
@@ -1044,7 +1045,7 @@ fn convertGroupsToDummies nodeArray =
 )
 
 -- Batch export a list of ExportNodeData sets to USD files
-fn performBatchExport exportSets outDir useOrigin useThumbnails startFrame endFrame fps useLegacyExport:false =
+fn performBatchExport exportSets outDir useOrigin useThumbnails startFrame endFrame fps useLegacyExport:false forceMaterialXSidecar:false =
 (
 	if exportSets.count > 0 then
 	(
@@ -1102,7 +1103,7 @@ fn performBatchExport exportSets outDir useOrigin useThumbnails startFrame endFr
 							)
 							else
 							(
-								result = exportUsdViaPythonBridge filePath item.rootNodes startFrame endFrame fps
+								result = exportUsdViaPythonBridge filePath item.rootNodes startFrame endFrame fps forceMaterialXSidecar:forceMaterialXSidecar
 								if result == false and i == 1 do abortBatch = true
 							)
 

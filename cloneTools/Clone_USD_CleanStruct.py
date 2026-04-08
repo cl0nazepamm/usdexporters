@@ -132,6 +132,57 @@ class CleanMaterialChaser(maxUsd.ExportChaser):
 
         return nodegraph_prim
 
+    def is_same_or_descendant_path(self, path, root_path):
+        path = str(path)
+        root_path = str(root_path)
+        return path == root_path or path.startswith(root_path + "/")
+
+    def has_external_reference_to_path(self, candidate_path):
+        """
+        Check whether anything outside the candidate prim subtree still points
+        at it. Internal connections inside the preview graph do not count.
+        """
+        candidate_path = str(candidate_path)
+
+        for prim in self.stage.Traverse():
+            source_path = str(prim.GetPath())
+            if self.is_same_or_descendant_path(source_path, candidate_path):
+                continue
+
+            for attr in prim.GetAuthoredAttributes():
+                try:
+                    for conn in attr.GetConnections():
+                        if self.is_same_or_descendant_path(conn.GetPrimPath(), candidate_path):
+                            return True
+                except Exception:
+                    pass
+
+            for rel in prim.GetAuthoredRelationships():
+                try:
+                    for target in rel.GetTargets():
+                        if self.is_same_or_descendant_path(target.GetPrimPath(), candidate_path):
+                            return True
+                except Exception:
+                    pass
+
+            for prim_spec in prim.GetPrimStack():
+                for list_name in ("referenceList", "payloadList", "inheritPathList", "specializesList"):
+                    list_op = getattr(prim_spec, list_name, None)
+                    if not list_op:
+                        continue
+
+                    for item_attr in ("prependedItems", "explicitItems", "addedItems", "appendedItems"):
+                        items = getattr(list_op, item_attr, None)
+                        if not items:
+                            continue
+
+                        for item in items:
+                            prim_path = getattr(item, "primPath", item)
+                            if prim_path and self.is_same_or_descendant_path(prim_path, candidate_path):
+                                return True
+
+        return False
+
     def get_primvar_varname(self, primvar_reader):
         """Get the actual varname value from a PrimvarReader, resolving connections."""
         if not primvar_reader:
@@ -294,11 +345,25 @@ class CleanMaterialChaser(maxUsd.ExportChaser):
 
     def remove_orphaned_nodegraphs(self, mtl_scope_path):
         """
-        Legacy no-op.
-        Only remove NodeGraphs that were explicitly flattened from a connected
-        UsdPreviewSurface input during process_material().
+        Remove only unreferenced preview-style NodeGraphs. This restores the
+        old Unreal-friendly cleanup without touching MaterialX or custom graphs.
         """
-        return
+        for prim in self.stage.Traverse():
+            if prim.GetTypeName() != "NodeGraph":
+                continue
+
+            prim_path = prim.GetPath()
+            if self.has_external_reference_to_path(prim_path):
+                continue
+
+            actual_nodegraph = self.resolve_nodegraph_to_shaders(prim)
+            if not self.is_safe_preview_texture_nodegraph(actual_nodegraph):
+                continue
+
+            self.nodegraphs_to_remove.add(str(prim_path))
+            actual_path = actual_nodegraph.GetPath()
+            if actual_path != prim_path and not self.has_external_reference_to_path(actual_path):
+                self.nodegraphs_to_remove.add(str(actual_path))
 
     def PostExport(self):
         try:
@@ -317,6 +382,8 @@ class CleanMaterialChaser(maxUsd.ExportChaser):
                 print(f"  Processing material: {mat_prim.GetPath()}")
                 self.process_material(mat_prim)
 
+            self.remove_orphaned_nodegraphs("/mtl")
+
             # Remove all marked NodeGraphs
             print(f"  Removing {len(self.nodegraphs_to_remove)} NodeGraph(s)...")
             for ng_path in self.nodegraphs_to_remove:
@@ -334,27 +401,30 @@ class CleanMaterialChaser(maxUsd.ExportChaser):
 
 
 # Register the chaser
+CLEAN_MATERIAL_CHASER_NAME = "cleanMaterialStructureV2"
+CLEAN_MATERIAL_CONTEXT_NAME = "cleanMaterialContextV2"
+
 maxUsd.ExportChaser.Register(
     CleanMaterialChaser,
-    "cleanMaterialStructure",
+    CLEAN_MATERIAL_CHASER_NAME,
     "Clean Material Structure",
-    "Flattens material structure for Unreal. Removes NodeGraph indirection."
+    "Flattens material structure for Unreal. Removes preview NodeGraph indirection."
 )
 
 
 def cleanMaterialContext():
     """Export context that enables the clean material chaser."""
     return {
-        'chaser': ['cleanMaterialStructure'],
-        'chaserNames': ['cleanMaterialStructure']
+        'chaser': [CLEAN_MATERIAL_CHASER_NAME],
+        'chaserNames': [CLEAN_MATERIAL_CHASER_NAME]
     }
 
 
 # Register the export context
 registeredContexts = maxUsd.JobContextRegistry.ListJobContexts()
-if 'cleanMaterialContext' not in registeredContexts:
+if CLEAN_MATERIAL_CONTEXT_NAME not in registeredContexts:
     maxUsd.JobContextRegistry.RegisterExportJobContext(
-        "cleanMaterialContext",
+        CLEAN_MATERIAL_CONTEXT_NAME,
         "Clean Material Structure",
         "Exports with clean, flat material structure compatible with Unreal",
         cleanMaterialContext

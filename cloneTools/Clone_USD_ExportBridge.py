@@ -1,7 +1,7 @@
 import os
 import traceback
 
-from pxr import Sdf, Usd
+from pxr import Sdf, Usd, UsdShade
 from pymxs import runtime as mxs
 
 
@@ -65,8 +65,8 @@ def _collect_materials(nodes):
 def _configure_export_options(start_frame, end_frame):
     options = mxs.USDExporter.CreateOptions()
 
-    options.ContextNames = _to_max_array(["usdPropertiesContext"])
-    options.ChaserNames = _to_max_array(["cleanMaterialStructure"])
+    options.ContextNames = _to_max_array(["usdPropertiesContext", "cleanMaterialContextV2"])
+    options.ChaserNames = _to_max_array(["cleanMaterialStructureV2"])
     options.AllMaterialConversions = _to_max_array(["UsdPreviewSurface"])
     options.UseLastResortUSDPreviewSurfaceWriter = True
     options.TranslateMaterials = True
@@ -121,6 +121,112 @@ def _detect_materialx(stage):
                     asset_attrs.append((attr, paths))
 
     return mtlx_found, asset_attrs
+
+
+def _is_same_or_descendant_path(path, root_path):
+    path = str(path)
+    root_path = str(root_path)
+    return path == root_path or path.startswith(root_path + "/")
+
+
+def _is_materialx_shader_id(shader_id):
+    if not shader_id:
+        return False
+
+    shader_id = str(shader_id)
+    shader_id_lower = shader_id.lower()
+    return (
+        shader_id.startswith("ND_")
+        or shader_id_lower.startswith("mtlx")
+        or "materialx" in shader_id_lower
+    )
+
+
+def _is_safe_preview_nodegraph(nodegraph_prim):
+    allowed_shader_ids = {"UsdUVTexture", "UsdPrimvarReader_float2"}
+    found_texture = False
+
+    for child in nodegraph_prim.GetChildren():
+        if child.GetTypeName() == "NodeGraph":
+            return False
+
+        if not child.IsA(UsdShade.Shader):
+            return False
+
+        shader = UsdShade.Shader(child)
+        shader_id = shader.GetIdAttr().Get() if shader.GetIdAttr() else None
+        if _is_materialx_shader_id(shader_id):
+            return False
+        if shader_id not in allowed_shader_ids:
+            return False
+        if shader_id == "UsdUVTexture":
+            found_texture = True
+
+    return found_texture
+
+
+def _has_external_reference_to_path(stage, candidate_path):
+    candidate_path = str(candidate_path)
+
+    for prim in stage.Traverse():
+        source_path = str(prim.GetPath())
+        if _is_same_or_descendant_path(source_path, candidate_path):
+            continue
+
+        for attr in prim.GetAuthoredAttributes():
+            try:
+                for conn in attr.GetConnections():
+                    if _is_same_or_descendant_path(conn.GetPrimPath(), candidate_path):
+                        return True
+            except Exception:
+                pass
+
+        for rel in prim.GetAuthoredRelationships():
+            try:
+                for target in rel.GetTargets():
+                    if _is_same_or_descendant_path(target.GetPrimPath(), candidate_path):
+                        return True
+            except Exception:
+                pass
+
+        for prim_spec in prim.GetPrimStack():
+            for list_name in ("referenceList", "payloadList", "inheritPathList", "specializesList"):
+                list_op = getattr(prim_spec, list_name, None)
+                if not list_op:
+                    continue
+
+                for item_attr in ("prependedItems", "explicitItems", "addedItems", "appendedItems"):
+                    items = getattr(list_op, item_attr, None)
+                    if not items:
+                        continue
+
+                    for item in items:
+                        prim_path = getattr(item, "primPath", item)
+                        if prim_path and _is_same_or_descendant_path(prim_path, candidate_path):
+                            return True
+
+    return False
+
+
+def _remove_orphan_preview_nodegraphs(stage):
+    nodegraphs_to_remove = []
+
+    for prim in stage.Traverse():
+        if prim.GetTypeName() != "NodeGraph":
+            continue
+        if _has_external_reference_to_path(stage, prim.GetPath()):
+            continue
+        if _is_safe_preview_nodegraph(prim):
+            nodegraphs_to_remove.append(str(prim.GetPath()))
+
+    for prim_path in nodegraphs_to_remove:
+        stage.RemovePrim(prim_path)
+
+    if nodegraphs_to_remove:
+        stage.GetRootLayer().Save()
+        print(f"MaterialX bridge: removed {len(nodegraphs_to_remove)} orphan preview NodeGraph(s)")
+
+    return nodegraphs_to_remove
 
 
 def _export_materialx_sidecar(usd_path, nodes):
@@ -196,6 +302,7 @@ def export_powerusd_asset():
     node_handles = _get_runtime_input("_powerusd_export_node_handles", [])
     start_frame = _get_runtime_input("_powerusd_export_start_frame", None)
     end_frame = _get_runtime_input("_powerusd_export_end_frame", None)
+    force_materialx_sidecar = bool(_get_runtime_input("_powerusd_force_materialx_sidecar", False))
 
     if not usd_path:
         raise RuntimeError("Missing _powerusd_export_path")
@@ -222,10 +329,12 @@ def export_powerusd_asset():
     if stage is None:
         raise RuntimeError(f"Failed to open exported USD stage: {usd_path}")
 
+    _remove_orphan_preview_nodegraphs(stage)
+
     has_materialx, asset_attrs = _detect_materialx(stage)
-    if has_materialx:
+    if has_materialx or force_materialx_sidecar:
         sidecar_path = _export_materialx_sidecar(usd_path, nodes)
-        if sidecar_path:
+        if sidecar_path and has_materialx:
             _rewrite_materialx_asset_paths(stage, asset_attrs, sidecar_path)
     else:
         print("MaterialX bridge: no MaterialX found in USD, skipping sidecar export")

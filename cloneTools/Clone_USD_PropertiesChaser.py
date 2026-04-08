@@ -881,10 +881,79 @@ class USDPropertiesChaser(maxUsd.ExportChaser):
 
         return changed_any
 
+    def _clone_reference_like_item(self, item, new_path):
+        """
+        Clone an Sdf.Reference or Sdf.Payload with a remapped prim path.
+        Keeps assetPath/layerOffset/customData intact.
+        """
+        item_type_name = type(item).__name__
+        if item_type_name == "Reference":
+            return Sdf.Reference(
+                assetPath=item.assetPath,
+                primPath=Sdf.Path(new_path),
+                layerOffset=item.layerOffset,
+                customData=item.customData
+            )
+
+        if item_type_name == "Payload":
+            return Sdf.Payload(
+                assetPath=item.assetPath,
+                primPath=Sdf.Path(new_path),
+                layerOffset=item.layerOffset
+            )
+
+        return None
+
+    def _remap_reference_like_list_op(self, list_op, strip_prefix, nest_target, mtl_names, replacement_prefix=None):
+        """
+        Remap primPath on Sdf.ReferenceListOp / Sdf.PayloadListOp items.
+        This is required because BatchNamespaceEdit does not rewrite internal
+        composition arcs authored as references/payloads.
+        """
+        changed_any = False
+        for field_name in ("explicitItems", "addedItems", "prependedItems", "appendedItems", "deletedItems"):
+            try:
+                items = list(getattr(list_op, field_name))
+            except Exception:
+                continue
+            if not items:
+                continue
+
+            remapped_items = []
+            changed_field = False
+            for item in items:
+                prim_path = getattr(item, "primPath", None)
+                prim_path_str = str(prim_path) if prim_path else ""
+                if not prim_path_str:
+                    remapped_items.append(item)
+                    continue
+
+                new_str = self._remap_path_str(
+                    prim_path_str, strip_prefix, nest_target, mtl_names, replacement_prefix
+                )
+                if new_str is None:
+                    remapped_items.append(item)
+                    continue
+
+                cloned = self._clone_reference_like_item(item, new_str)
+                if cloned is None:
+                    remapped_items.append(item)
+                    continue
+
+                remapped_items.append(cloned)
+                changed_field = True
+
+            if changed_field:
+                setattr(list_op, field_name, remapped_items)
+                changed_any = True
+
+        return changed_any
+
     def _remap_primspec_path_lists(self, layer, strip_prefix, nest_target, mtl_names, replacement_prefix=None):
         """
         Remap prim-spec path list-ops that BatchNamespaceEdit can leave stale,
-        especially inherit/specialize arcs used by MaxUSD class-based instances.
+        especially inherit/specialize arcs and internal reference/payload arcs
+        used by MaxUSD material networks and class-based instances.
         """
         remapped_specs = 0
         for root_spec in layer.rootPrims:
@@ -898,6 +967,18 @@ class USDPropertiesChaser(maxUsd.ExportChaser):
                     if not list_op:
                         continue
                     if self._remap_path_list_op(
+                        list_op, strip_prefix, nest_target, mtl_names, replacement_prefix
+                    ):
+                        changed_spec = True
+
+                for list_name in ("referenceList", "payloadList"):
+                    try:
+                        list_op = getattr(prim_spec, list_name)
+                    except Exception:
+                        list_op = None
+                    if not list_op:
+                        continue
+                    if self._remap_reference_like_list_op(
                         list_op, strip_prefix, nest_target, mtl_names, replacement_prefix
                     ):
                         changed_spec = True

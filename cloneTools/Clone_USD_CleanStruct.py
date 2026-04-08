@@ -45,6 +45,48 @@ class CleanMaterialChaser(maxUsd.ExportChaser):
 
         return texture_shader, primvar_reader
 
+    def is_materialx_shader_id(self, shader_id):
+        """Best-effort detection for MaterialX shader identifiers."""
+        if not shader_id:
+            return False
+
+        shader_id = str(shader_id)
+        shader_id_lower = shader_id.lower()
+        return (
+            shader_id.startswith("ND_")
+            or shader_id_lower.startswith("mtlx")
+            or "materialx" in shader_id_lower
+        )
+
+    def is_safe_preview_texture_nodegraph(self, nodegraph_prim):
+        """
+        Only flatten the tiny MaxUSD preview-texture graphs we explicitly support.
+        Preserve anything else, especially MaterialX or richer custom networks.
+        """
+        allowed_shader_ids = {"UsdUVTexture", "UsdPrimvarReader_float2"}
+        found_texture = False
+
+        for child in nodegraph_prim.GetChildren():
+            if child.GetTypeName() == "NodeGraph":
+                return False
+
+            if not child.IsA(UsdShade.Shader):
+                return False
+
+            shader = UsdShade.Shader(child)
+            shader_id = self.get_shader_id(shader)
+
+            if self.is_materialx_shader_id(shader_id):
+                return False
+
+            if shader_id not in allowed_shader_ids:
+                return False
+
+            if shader_id == "UsdUVTexture":
+                found_texture = True
+
+        return found_texture
+
     def find_nodegraph_by_name(self, name):
         """
         Find a standalone NodeGraph by name in the mtl scope.
@@ -81,13 +123,11 @@ class CleanMaterialChaser(maxUsd.ExportChaser):
                 ref_path = refs[0].primPath
                 source_prim = self.stage.GetPrimAtPath(ref_path)
                 if source_prim:
-                    self.nodegraphs_to_remove.add(str(ref_path))
                     return source_prim
 
         # Third try: search by name
         source = self.find_nodegraph_by_name(nodegraph_prim.GetName())
         if source:
-            self.nodegraphs_to_remove.add(str(source.GetPath()))
             return source
 
         return nodegraph_prim
@@ -136,6 +176,8 @@ class CleanMaterialChaser(maxUsd.ExportChaser):
         'normal', 'roughness', 'metallic', 'occlusion', 'displacement',
         'opacity', 'clearcoat', 'clearcoatroughness', 'ior'
     }
+
+    SUPPORTED_TEXTURE_OUTPUTS = {"rgb", "r", "g", "b", "a"}
 
     def create_clean_texture_shader(self, material_path, source_texture, source_primvar, input_name):
         """
@@ -196,20 +238,16 @@ class CleanMaterialChaser(maxUsd.ExportChaser):
 
     def process_material(self, material_prim):
         """Process a single material, flattening its shader structure."""
-        material = UsdShade.Material(material_prim)
         material_path = material_prim.GetPath()
 
         # Find the UsdPreviewSurface shader
         surface_shader = None
-        nodegraphs_in_material = []
 
         for child in material_prim.GetChildren():
             if child.IsA(UsdShade.Shader):
                 shader = UsdShade.Shader(child)
                 if self.get_shader_id(shader) == "UsdPreviewSurface":
                     surface_shader = shader
-            elif child.GetTypeName() == "NodeGraph":
-                nodegraphs_in_material.append(child)
 
         if not surface_shader:
             return
@@ -228,11 +266,16 @@ class CleanMaterialChaser(maxUsd.ExportChaser):
 
             # Check if connected to a NodeGraph
             if source_prim.GetTypeName() == "NodeGraph":
-                # Mark for removal
-                self.nodegraphs_to_remove.add(str(source_prim.GetPath()))
-
                 # Resolve any references to find actual shaders
                 actual_nodegraph = self.resolve_nodegraph_to_shaders(source_prim)
+
+                if not self.is_safe_preview_texture_nodegraph(actual_nodegraph):
+                    print(f"    Preserving non-preview or MaterialX nodegraph: {actual_nodegraph.GetPath()}")
+                    continue
+
+                if output_name not in self.SUPPORTED_TEXTURE_OUTPUTS:
+                    print(f"    Preserving nodegraph with unsupported output '{output_name}': {actual_nodegraph.GetPath()}")
+                    continue
 
                 # Find texture and primvar reader in the nodegraph
                 texture_shader, primvar_reader = self.find_texture_in_nodegraph(actual_nodegraph)
@@ -246,20 +289,16 @@ class CleanMaterialChaser(maxUsd.ExportChaser):
 
                     # Reconnect the surface shader input to new texture
                     inp.ConnectToSource(new_texture.ConnectableAPI(), output_name)
-
-        # Mark all NodeGraphs in this material for removal
-        for ng in nodegraphs_in_material:
-            self.nodegraphs_to_remove.add(str(ng.GetPath()))
+                    self.nodegraphs_to_remove.add(str(source_prim.GetPath()))
+                    self.nodegraphs_to_remove.add(str(actual_nodegraph.GetPath()))
 
     def remove_orphaned_nodegraphs(self, mtl_scope_path):
-        """Remove standalone NodeGraphs that were used as references."""
-        mtl_prim = self.stage.GetPrimAtPath(mtl_scope_path)
-        if not mtl_prim:
-            return
-
-        for child in mtl_prim.GetChildren():
-            if child.GetTypeName() == "NodeGraph":
-                self.nodegraphs_to_remove.add(str(child.GetPath()))
+        """
+        Legacy no-op.
+        Only remove NodeGraphs that were explicitly flattened from a connected
+        UsdPreviewSurface input during process_material().
+        """
+        return
 
     def PostExport(self):
         try:
@@ -277,12 +316,6 @@ class CleanMaterialChaser(maxUsd.ExportChaser):
             for mat_prim in materials:
                 print(f"  Processing material: {mat_prim.GetPath()}")
                 self.process_material(mat_prim)
-
-            # Find and mark orphaned NodeGraphs in mtl scope
-            # These are the source NodeGraphs that materials reference
-            for prim in self.stage.Traverse():
-                if prim.GetTypeName() == "Scope" and prim.GetName() == "mtl":
-                    self.remove_orphaned_nodegraphs(prim.GetPath())
 
             # Remove all marked NodeGraphs
             print(f"  Removing {len(self.nodegraphs_to_remove)} NodeGraph(s)...")

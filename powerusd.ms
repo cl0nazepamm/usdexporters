@@ -394,7 +394,7 @@ buttonText:"Clone PowerUSD UI"
 			local startF = animationRange.start.frame as integer
 			local endF = animationRange.end.frame as integer
 			local fps = frameRate as integer
-			local exportSuccess = ::performBatchExport exportSets outDir false chk_thumbnail.checked startF endF fps
+			local exportSuccess = ::performBatchExport exportSets outDir false chk_thumbnail.checked startF endF fps useLegacyExport:true
 
 			if exportSuccess do
 			(
@@ -472,7 +472,7 @@ buttonText:"Clone PowerUSD UI"
 			local startF = animationRange.start.frame as integer
 			local endF = animationRange.end.frame as integer
 			local fps = frameRate as integer
-			local exportSuccess = ::performBatchExport exportSets outDir false chk_thumbnail.checked startF endF fps
+			local exportSuccess = ::performBatchExport exportSets outDir false chk_thumbnail.checked startF endF fps useLegacyExport:true
 
 			if exportSuccess do
 			(

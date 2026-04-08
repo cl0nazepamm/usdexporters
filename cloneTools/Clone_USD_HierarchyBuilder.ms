@@ -32,7 +32,13 @@ global writeCameraSequence
 global captureViewportThumb
 global buildParentFolderPath
 global convertGroupsToDummies
+global exportMaterialXSidecarForNodes
+global exportUsdViaPythonBridge
 global performBatchExport
+global g_PowerUSD_HierarchyBuilderDir
+
+if (getSourceFileName() != undefined and getSourceFileName() != "") do
+	g_PowerUSD_HierarchyBuilderDir = getFilenamePath (getSourceFileName())
 
 struct ExportNodeData
 (
@@ -406,6 +412,83 @@ fn jsonEscapeString s =
 	out
 )
 
+fn pythonEscapeString s =
+(
+	local out = s as string
+	out = substituteString out "\\" "\\\\"
+	out = substituteString out "'" "\\'"
+	out = substituteString out "\r" "\\r"
+	out = substituteString out "\n" "\\n"
+	out = substituteString out "\t" "\\t"
+	out
+)
+
+fn pythonListFromNodeHandles nodes =
+(
+	local out = "["
+	local firstItem = true
+	for n in nodes do
+	(
+		if not isValidNode n do continue
+		local handle = try((getHandleByAnim n) as integer)catch(undefined)
+		if handle == undefined do continue
+		if not firstItem do out += ", "
+		out += (handle as string)
+		firstItem = false
+	)
+	out += "]"
+	out
+)
+
+fn exportUsdViaPythonBridge filePath nodes startFrame endFrame fps =
+(
+	local bridgeDir = if g_PowerUSD_HierarchyBuilderDir != undefined and g_PowerUSD_HierarchyBuilderDir != "" then g_PowerUSD_HierarchyBuilderDir else ""
+	if bridgeDir == "" and isFunction ::PowerUSD_getScriptsDir do bridgeDir = (::PowerUSD_getScriptsDir() + "cloneTools\\")
+
+	local bridgePath = bridgeDir + "Clone_USD_ExportBridge.py"
+	if not doesFileExist bridgePath then
+	(
+		format "Python USD export FAILED: missing bridge script %\n" bridgePath
+		return false
+	)
+
+	local nodeHandlesPy = pythonListFromNodeHandles nodes
+	if nodeHandlesPy == "[]" then
+	(
+		format "Python USD export skipped: no valid node handles.\n"
+		return false
+	)
+
+	local safeFilePath = pythonEscapeString filePath
+
+	global g_PowerUSD_PythonExportOk = false
+	global g_PowerUSD_PythonExportError = ""
+
+	python.Execute ("import pymxs; pymxs.runtime._powerusd_export_path = r'" + safeFilePath + "'")
+	python.Execute ("import pymxs; pymxs.runtime._powerusd_export_node_handles = " + nodeHandlesPy)
+	python.Execute ("import pymxs; pymxs.runtime._powerusd_export_start_frame = " + ((startFrame as integer) as string))
+	python.Execute ("import pymxs; pymxs.runtime._powerusd_export_end_frame = " + ((endFrame as integer) as string))
+	python.Execute ("import pymxs; pymxs.runtime._powerusd_export_fps = " + ((fps as integer) as string))
+	python.Execute "import pymxs; pymxs.runtime.g_PowerUSD_PythonExportOk = False; pymxs.runtime.g_PowerUSD_PythonExportError = ''"
+
+	try
+	(
+		python.ExecuteFile bridgePath
+	)
+	catch
+	(
+		g_PowerUSD_PythonExportError = getCurrentException() as string
+	)
+
+	if g_PowerUSD_PythonExportOk != true do
+	(
+		local errMsg = if g_PowerUSD_PythonExportError != undefined and g_PowerUSD_PythonExportError != "" then g_PowerUSD_PythonExportError else "Unknown Python export error"
+		format "Python USD export FAILED: %\n" errMsg
+	)
+
+	g_PowerUSD_PythonExportOk == true
+)
+
 fn writeHierarchyMetadata exportSets outDir =
 (
 	local metaPath = outDir + "\\_hierarchy.json"
@@ -750,6 +833,74 @@ fn captureViewportThumb nodes filePath thumbSize:256 =
 	return true
 )
 
+fn exportMaterialXSidecarForNodes nodes usdFilePath =
+(
+	if usdFilePath == undefined or usdFilePath == "" then return false
+
+	try (
+		if MtlXIOUtil == undefined then
+		(
+			format "MaterialX sidecar skipped: MtlXIOUtil unavailable.\n"
+			return false
+		)
+	) catch (
+		format "MaterialX sidecar skipped: MtlXIOUtil unavailable.\n"
+		return false
+	)
+
+	local materials = #()
+	local seenKeys = #()
+
+	for n in nodes do
+	(
+		if not isValidNode n do continue
+		local m = try(n.material)catch(undefined)
+		if m == undefined do continue
+
+		local key = try((getHandleByAnim m) as string)catch("")
+		if key == "" do key = try((m.name as string) + "|" + ((classof m) as string))catch((m as string))
+
+		if findItem seenKeys key == 0 do
+		(
+			append seenKeys key
+			append materials m
+		)
+	)
+
+	if materials.count == 0 then
+	(
+		format "MaterialX sidecar skipped: no materials on exported nodes.\n"
+		return false
+	)
+
+	local sidecarPath = (getFilenamePath usdFilePath) + (getFilenameFile usdFilePath) + ".mtlx"
+
+	try
+	(
+		MtlXIOUtil.SetDefaults()
+		if isProperty MtlXIOUtil #CopyTexturesToSaveLocation do MtlXIOUtil.CopyTexturesToSaveLocation = true
+		if isProperty MtlXIOUtil #UseRelativePaths do MtlXIOUtil.UseRelativePaths = true
+		if isProperty MtlXIOUtil #ResolveTexturePaths do MtlXIOUtil.ResolveTexturePaths = true
+
+		local ok = MtlXIOUtil.ExportMtlX sidecarPath materials
+		if ok then
+		(
+			format "MaterialX sidecar written: %\n" sidecarPath
+			true
+		)
+		else
+		(
+			format "MaterialX sidecar FAILED: %\n" (try(MtlXIOUtil.GetError())catch("Unknown error"))
+			false
+		)
+	)
+	catch
+	(
+		format "MaterialX sidecar FAILED: %\n" (getCurrentException())
+		false
+	)
+)
+
 -- Permanently convert Max groups to plain Dummy helpers in the given selection.
 -- Must be called BEFORE buildAdvancedExportSets so the export sets see plain Dummies.
 -- Group heads cause double-wrapping under Xforms in MaxUSD.
@@ -893,7 +1044,7 @@ fn convertGroupsToDummies nodeArray =
 )
 
 -- Batch export a list of ExportNodeData sets to USD files
-fn performBatchExport exportSets outDir useOrigin useThumbnails startFrame endFrame fps =
+fn performBatchExport exportSets outDir useOrigin useThumbnails startFrame endFrame fps useLegacyExport:false =
 (
 	if exportSets.count > 0 then
 	(
@@ -937,15 +1088,22 @@ fn performBatchExport exportSets outDir useOrigin useThumbnails startFrame endFr
 							)
 
 							local result = false
-
-							if i == 1 then
+							if useLegacyExport then
 							(
-								result = exportFile filePath selectedOnly:true
-								if result == false do abortBatch = true
+								if i == 1 then
+								(
+									result = exportFile filePath selectedOnly:true
+									if result == false do abortBatch = true
+								)
+								else
+								(
+									result = exportFile filePath #noPrompt selectedOnly:true
+								)
 							)
 							else
 							(
-								result = exportFile filePath #noPrompt selectedOnly:true
+								result = exportUsdViaPythonBridge filePath item.rootNodes startFrame endFrame fps
+								if result == false and i == 1 do abortBatch = true
 							)
 
 							if useThumbnails and result != false do

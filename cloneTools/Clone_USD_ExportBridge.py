@@ -297,12 +297,44 @@ def _rewrite_materialx_asset_paths(stage, asset_attrs, sidecar_path):
     return changed
 
 
+def _inline_materialx_into_usd(usd_path, sidecar_path):
+    if not sidecar_path or not os.path.exists(sidecar_path):
+        raise RuntimeError("MaterialX inline requested, but no sidecar file was written")
+
+    stage = Usd.Stage.Open(usd_path)
+    if stage is None:
+        raise RuntimeError(f"Failed to reopen USD stage for MaterialX inline: {usd_path}")
+
+    local_root_path = Sdf.Path("/MaterialX")
+    local_root = stage.GetPrimAtPath(local_root_path)
+    if local_root and local_root.IsValid():
+        stage.RemovePrim(local_root_path)
+
+    local_root = stage.DefinePrim(local_root_path, "Scope")
+    refs = local_root.GetReferences()
+    refs.AddReference(os.path.basename(sidecar_path), "/MaterialX")
+    stage.GetRootLayer().Save()
+
+    flattened = stage.Flatten()
+    flattened.Export(usd_path)
+    stage = None
+
+    try:
+        os.remove(sidecar_path)
+        print(f"MaterialX bridge: inlined MaterialX into {usd_path} and removed {sidecar_path}")
+    except OSError:
+        print(f"MaterialX bridge: inlined MaterialX into {usd_path} (temporary sidecar kept: {sidecar_path})")
+
+    return True
+
+
 def export_powerusd_asset():
     usd_path = _get_runtime_input("_powerusd_export_path", "")
     node_handles = _get_runtime_input("_powerusd_export_node_handles", [])
     start_frame = _get_runtime_input("_powerusd_export_start_frame", None)
     end_frame = _get_runtime_input("_powerusd_export_end_frame", None)
     force_materialx_sidecar = bool(_get_runtime_input("_powerusd_force_materialx_sidecar", False))
+    inline_materialx_into_usd = bool(_get_runtime_input("_powerusd_inline_materialx_into_usd", False))
 
     if not usd_path:
         raise RuntimeError("Missing _powerusd_export_path")
@@ -332,12 +364,16 @@ def export_powerusd_asset():
     _remove_orphan_preview_nodegraphs(stage)
 
     has_materialx, asset_attrs = _detect_materialx(stage)
-    if has_materialx or force_materialx_sidecar:
+    sidecar_path = None
+    if has_materialx or force_materialx_sidecar or inline_materialx_into_usd:
         sidecar_path = _export_materialx_sidecar(usd_path, nodes)
         if sidecar_path and has_materialx:
             _rewrite_materialx_asset_paths(stage, asset_attrs, sidecar_path)
     else:
         print("MaterialX bridge: no MaterialX found in USD, skipping sidecar export")
+
+    if inline_materialx_into_usd:
+        _inline_materialx_into_usd(usd_path, sidecar_path)
 
     return True
 

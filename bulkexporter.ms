@@ -99,6 +99,7 @@ buttonText:"Clone Bulk USD"
 			checkbox chk_origin "Move to Origin" checked:false tooltip:"Temporarily moves root to 0,0,0 for export."
 			checkbox chk_thumbnail "Generate Thumbnails" checked:false tooltip:"Render a thumbnail for each exported asset."
 			checkbox chk_force_mtlx "Force MaterialX Sidecar" checked:false tooltip:"Always write a .mtlx sidecar next to each bulk-exported USD, even when the USD only contains UsdPreviewSurface."
+			checkbox chk_inline_mtlx "Inline MaterialX Into USD" checked:false tooltip:"Final postpass: generate MaterialX, compose it into the exported USD, then remove the temporary .mtlx sidecar."
 		)
 
 		button btn_export "EXPORT SELECTED" width:200 height:40 highlightColor:(color 0 200 0)
@@ -147,7 +148,7 @@ buttonText:"Clone Bulk USD"
 			local startF = animationRange.start.frame as integer
 			local endF = animationRange.end.frame as integer
 			local fps = frameRate as integer
-			local exportSuccess = ::performBatchExport exportSets outDir chk_origin.checked chk_thumbnail.checked startF endF fps forceMaterialXSidecar:chk_force_mtlx.checked
+			local exportSuccess = ::performBatchExport exportSets outDir chk_origin.checked chk_thumbnail.checked startF endF fps forceMaterialXSidecar:(chk_force_mtlx.checked or chk_inline_mtlx.checked) inlineMaterialXIntoUsd:chk_inline_mtlx.checked
 
 			if exportSuccess do
 			(
@@ -263,7 +264,7 @@ buttonText:"Clone Bulk USD"
 			local startF = animationRange.start.frame as integer
 			local endF = animationRange.end.frame as integer
 			local fps = frameRate as integer
-			local exportSuccess = ::performBatchExport exportSets outDir chk_origin.checked chk_thumbnail.checked startF endF fps forceMaterialXSidecar:chk_force_mtlx.checked
+			local exportSuccess = ::performBatchExport exportSets outDir chk_origin.checked chk_thumbnail.checked startF endF fps forceMaterialXSidecar:(chk_force_mtlx.checked or chk_inline_mtlx.checked) inlineMaterialXIntoUsd:chk_inline_mtlx.checked
 
 			if exportSuccess do
 			(

@@ -264,6 +264,11 @@ class CleanMaterialChaser(maxUsd.ExportChaser):
             color_space = "raw" if input_name.lower() in self.LINEAR_INPUTS else "sRGB"
             texture_shader.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set(color_space)
 
+        # 8-bit tangent-space normal maps need decode scale/bias per USD compliance.
+        if input_name.lower() == "normal":
+            texture_shader.CreateInput("scale", Sdf.ValueTypeNames.Float4).Set((2.0, 2.0, 2.0, 1.0))
+            texture_shader.CreateInput("bias", Sdf.ValueTypeNames.Float4).Set((-1.0, -1.0, -1.0, 0.0))
+
         # Create outputs
         texture_shader.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
         texture_shader.CreateOutput("r", Sdf.ValueTypeNames.Float)

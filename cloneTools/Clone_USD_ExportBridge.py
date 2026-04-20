@@ -208,6 +208,140 @@ def _has_external_reference_to_path(stage, candidate_path):
     return False
 
 
+def _wrap_single_content_as_asset(stage):
+    """
+    If the root layer's defaultPrim is a single Gprim-like prim with a nested
+    mtl/Looks/Materials Scope, wrap it as a proper USD asset:
+
+        def Xform "<name>" (kind = "component") {
+            def Mesh "Geom" { ... material:binding = </<name>/mtl/...> ... }
+            def Scope "mtl" { def Material ... }
+        }
+
+    Runs on the reopened post-export stage where layer.Save() actually persists
+    (the equivalent transform during a chaser PostExport does not persist, even
+    through layer-direct APIs — likely because maxUsd serializes the export
+    stage ahead of chaser edits for stage-level operations).
+
+    Returns True if the wrap was applied.
+    """
+    from pxr import UsdGeom, UsdShade
+
+    layer = stage.GetRootLayer()
+    default_name = layer.defaultPrim
+    if not default_name or default_name == "root":
+        return False
+
+    content_path = Sdf.Path("/" + default_name)
+    content_spec = layer.GetPrimAtPath(content_path)
+    if not content_spec:
+        return False
+
+    container_types = {"Xform", "Scope", "SkelRoot", "Skeleton", "Material", ""}
+    if content_spec.typeName in container_types:
+        return False
+    if content_spec.specifier != Sdf.SpecifierDef:
+        return False
+
+    mtl_child_name = None
+    for child in content_spec.nameChildren:
+        if child.name in ("mtl", "Looks", "Materials") and child.typeName == "Scope":
+            mtl_child_name = child.name
+            break
+    if not mtl_child_name:
+        return False
+
+    original_type = content_spec.typeName
+    tmp_name = "__asset_wrap_tmp__"
+    if layer.GetPrimAtPath(Sdf.Path("/" + tmp_name)):
+        print(f"Asset wrap: /{tmp_name} already exists, skipping wrap")
+        return False
+
+    tmp_path = Sdf.Path("/" + tmp_name)
+    geom_name = "Geom"
+    geom_path = content_path.AppendChild(geom_name)
+    mtl_final_path = content_path.AppendChild(mtl_child_name)
+
+    rename_edit = Sdf.BatchNamespaceEdit()
+    rename_edit.Add(content_path, tmp_path)
+    if not layer.Apply(rename_edit):
+        print(f"Asset wrap: could not rename {content_path} -> {tmp_path}")
+        return False
+
+    _remap_paths_after_move(stage, str(content_path), str(tmp_path))
+
+    Sdf.CreatePrimInLayer(layer, content_path)
+    new_spec = layer.GetPrimAtPath(content_path)
+    if new_spec is None:
+        print(f"Asset wrap: failed to create root spec at {content_path}")
+        return False
+    new_spec.specifier = Sdf.SpecifierDef
+    new_spec.typeName = "Xform"
+    new_spec.SetInfo("kind", "component")
+
+    move_edit = Sdf.BatchNamespaceEdit()
+    move_edit.Add(tmp_path.AppendChild(mtl_child_name), mtl_final_path)
+    move_edit.Add(tmp_path, geom_path)
+    if not layer.Apply(move_edit):
+        print(f"Asset wrap: move step failed for {tmp_path}")
+        return False
+
+    mtl_tmp_prefix = str(tmp_path.AppendChild(mtl_child_name))
+    _remap_paths_after_move(stage, mtl_tmp_prefix, str(mtl_final_path))
+    _remap_paths_after_move(stage, str(tmp_path), str(geom_path))
+
+    layer.Save()
+    print(
+        f"Asset wrap: /{default_name} -> def Xform (kind=component) "
+        f"{{ {original_type} '{geom_name}', Scope '{mtl_child_name}' }}"
+    )
+    return True
+
+
+def _remap_paths_after_move(stage, old_prefix, new_prefix):
+    """Rewrite relationship targets and attribute connections after a move."""
+
+    def remap(path_str):
+        if path_str == old_prefix:
+            return new_prefix
+        if path_str.startswith(old_prefix + "/"):
+            return new_prefix + path_str[len(old_prefix):]
+        return None
+
+    for prim in stage.TraverseAll():
+        for rel in prim.GetRelationships():
+            targets = rel.GetTargets()
+            if not targets:
+                continue
+            new_targets = []
+            changed = False
+            for t in targets:
+                replaced = remap(str(t))
+                if replaced is not None:
+                    new_targets.append(Sdf.Path(replaced))
+                    changed = True
+                else:
+                    new_targets.append(t)
+            if changed:
+                rel.SetTargets(new_targets)
+
+        for attr in prim.GetAttributes():
+            conns = attr.GetConnections()
+            if not conns:
+                continue
+            new_conns = []
+            changed = False
+            for c in conns:
+                replaced = remap(str(c))
+                if replaced is not None:
+                    new_conns.append(Sdf.Path(replaced))
+                    changed = True
+                else:
+                    new_conns.append(c)
+            if changed:
+                attr.SetConnections(new_conns)
+
+
 def _remove_orphan_preview_nodegraphs(stage):
     nodegraphs_to_remove = []
 
@@ -297,27 +431,156 @@ def _rewrite_materialx_asset_paths(stage, asset_attrs, sidecar_path):
     return changed
 
 
+def _remap_layer_paths_prefix(usd_layer, old_prefix, new_prefix):
+    """
+    Walk every prim spec in the layer and rewrite any relationship target,
+    attribute connection, or references-list asset path whose path starts with
+    old_prefix so it points at new_prefix instead. Operates purely on Sdf
+    layer specs so the edits persist on layer.Save().
+    """
+    def remap_path(path):
+        s = str(path)
+        if s == old_prefix:
+            return Sdf.Path(new_prefix)
+        if s.startswith(old_prefix + "/") or s.startswith(old_prefix + "."):
+            return Sdf.Path(new_prefix + s[len(old_prefix):])
+        return None
+
+    def visit(prim_spec):
+        for rel_spec in prim_spec.relationships:
+            for key in ("targetPathList",):
+                path_list = getattr(rel_spec, key, None)
+                if path_list is None:
+                    continue
+                for attr in ("explicitItems", "addedItems", "prependedItems",
+                             "appendedItems", "deletedItems", "orderedItems"):
+                    items = list(getattr(path_list, attr, []))
+                    changed = False
+                    for i, p in enumerate(items):
+                        replaced = remap_path(p)
+                        if replaced is not None:
+                            items[i] = replaced
+                            changed = True
+                    if changed:
+                        getattr(path_list, attr)[:] = items
+        for attr_spec in prim_spec.attributes:
+            path_list = attr_spec.connectionPathList
+            for attr in ("explicitItems", "addedItems", "prependedItems",
+                         "appendedItems", "deletedItems", "orderedItems"):
+                items = list(getattr(path_list, attr, []))
+                changed = False
+                for i, p in enumerate(items):
+                    replaced = remap_path(p)
+                    if replaced is not None:
+                        items[i] = replaced
+                        changed = True
+                if changed:
+                    getattr(path_list, attr)[:] = items
+        for child in prim_spec.nameChildren:
+            visit(child)
+
+    for root in usd_layer.rootPrims:
+        visit(root)
+
+
+def _relocate_materialx_under_asset(usd_layer):
+    """
+    After Sdf.CopySpec brings /MaterialX into the USD layer, the MaterialX
+    Materials live at /MaterialX/Materials/<Name> but the meshes are bound to
+    /<asset>/mtl/<Name> (a UsdPreviewSurface-only material emitted by maxUsd).
+    Move each MaterialX Material onto the bound path so the existing
+    material:binding relationships resolve to real MaterialX.
+
+    /MaterialX/Shaders and /MaterialX/NodeGraphs stay in place — the moved
+    Material's child Shader/NodeGraph specs reference them via
+    `prepend references = </MaterialX/Shaders/...>`, so removing them would
+    strip the authoritative MaterialX definitions.
+
+    BatchNamespaceEdit's docs claim it auto-remaps within-subtree connection
+    paths, but in practice on material subtrees containing referenced
+    child shaders it does not — so we remap manually after the move.
+    """
+    default_name = usd_layer.defaultPrim
+    if not default_name:
+        return
+    asset_mtl_path = Sdf.Path("/" + default_name + "/mtl")
+
+    mtlx_materials_path = Sdf.Path("/MaterialX/Materials")
+    mtlx_materials_spec = usd_layer.GetPrimAtPath(mtlx_materials_path)
+    if mtlx_materials_spec is None:
+        return
+
+    if usd_layer.GetPrimAtPath(asset_mtl_path) is None:
+        scope_spec = Sdf.CreatePrimInLayer(usd_layer, asset_mtl_path)
+        scope_spec.specifier = Sdf.SpecifierDef
+        scope_spec.typeName = "Scope"
+
+    moves = []
+    edit = Sdf.BatchNamespaceEdit()
+    for mat_spec in list(mtlx_materials_spec.nameChildren):
+        mat_name = mat_spec.name
+        src = mtlx_materials_path.AppendChild(mat_name)
+        dst = asset_mtl_path.AppendChild(mat_name)
+        existing = usd_layer.GetPrimAtPath(dst)
+        if existing is not None:
+            edit.Add(dst, Sdf.Path.emptyPath)
+        edit.Add(src, dst)
+        moves.append((str(src), str(dst)))
+
+    if not usd_layer.Apply(edit):
+        print("MaterialX bridge: namespace edit to relocate MaterialX materials failed")
+        return
+
+    for old_prefix, new_prefix in moves:
+        _remap_layer_paths_prefix(usd_layer, old_prefix, new_prefix)
+
+    empty_materials = usd_layer.GetPrimAtPath(mtlx_materials_path)
+    if empty_materials is not None and not list(empty_materials.nameChildren):
+        del usd_layer.GetPrimAtPath(Sdf.Path("/MaterialX")).nameChildren["Materials"]
+
+
 def _inline_materialx_into_usd(usd_path, sidecar_path):
+    """
+    Inline MaterialX content into the USD layer by deep-copying specs from
+    the .mtlx layer directly via Sdf.CopySpec. The previous implementation
+    used Usd.Stage.Flatten() + Export(), but flattening a stage with an
+    MTLX-plugin-loaded layer corrupts the exported USDC (values come back as
+    empty VtValue on read). CopySpec sidesteps the composition engine
+    entirely — it just copies layer specs, which is what "inline" really
+    means.
+    """
     if not sidecar_path or not os.path.exists(sidecar_path):
         raise RuntimeError("MaterialX inline requested, but no sidecar file was written")
 
-    stage = Usd.Stage.Open(usd_path)
-    if stage is None:
-        raise RuntimeError(f"Failed to reopen USD stage for MaterialX inline: {usd_path}")
+    usd_layer = Sdf.Layer.FindOrOpen(usd_path)
+    if usd_layer is None:
+        raise RuntimeError(f"Failed to open USD layer for MaterialX inline: {usd_path}")
 
-    local_root_path = Sdf.Path("/MaterialX")
-    local_root = stage.GetPrimAtPath(local_root_path)
-    if local_root and local_root.IsValid():
-        stage.RemovePrim(local_root_path)
+    mtlx_layer = Sdf.Layer.FindOrOpen(sidecar_path)
+    if mtlx_layer is None:
+        raise RuntimeError(f"Failed to open MTLX layer for inline: {sidecar_path}")
 
-    local_root = stage.DefinePrim(local_root_path, "Scope")
-    refs = local_root.GetReferences()
-    refs.AddReference(os.path.basename(sidecar_path), "/MaterialX")
-    stage.GetRootLayer().Save()
+    mtlx_root_path = Sdf.Path("/MaterialX")
+    mtlx_root_spec = mtlx_layer.GetPrimAtPath(mtlx_root_path)
+    if mtlx_root_spec is None:
+        raise RuntimeError(
+            f"MTLX layer {sidecar_path} does not expose a /MaterialX root prim"
+        )
 
-    flattened = stage.Flatten()
-    flattened.Export(usd_path)
-    stage = None
+    if usd_layer.GetPrimAtPath(mtlx_root_path):
+        del usd_layer.rootPrims["MaterialX"]
+
+    Sdf.CreatePrimInLayer(usd_layer, mtlx_root_path)
+    if not Sdf.CopySpec(mtlx_layer, mtlx_root_path, usd_layer, mtlx_root_path):
+        raise RuntimeError(
+            f"Sdf.CopySpec failed to inline {mtlx_root_path} from {sidecar_path}"
+        )
+
+    _relocate_materialx_under_asset(usd_layer)
+
+    usd_layer.Save()
+    usd_layer = None
+    mtlx_layer = None
 
     try:
         os.remove(sidecar_path)
@@ -357,11 +620,21 @@ def export_powerusd_asset():
     if not ok:
         raise RuntimeError("USDExporter.ExportFile returned false")
 
+    # USDExporter writes the fresh file to disk, but a previously cached
+    # Sdf.Layer at the same path (for example from a prior corrupt-state run
+    # that was explicitly cleared) can short-circuit FindOrOpen and yield an
+    # empty in-memory layer — even though the on-disk bytes are correct.
+    # Force a reload so the post-export stage reflects what was just written.
+    existing_layer = Sdf.Layer.Find(usd_path)
+    if existing_layer is not None:
+        existing_layer.Reload(force=True)
+
     stage = Usd.Stage.Open(usd_path)
     if stage is None:
         raise RuntimeError(f"Failed to open exported USD stage: {usd_path}")
 
     _remove_orphan_preview_nodegraphs(stage)
+    _wrap_single_content_as_asset(stage)
 
     has_materialx, asset_attrs = _detect_materialx(stage)
     sidecar_path = None

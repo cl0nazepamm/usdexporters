@@ -37,27 +37,57 @@ def _collect_nodes_from_handles(node_handles):
 
 
 def _collect_materials(nodes):
+    """
+    Collect the flat set of LEAF materials used by the given nodes.
+
+    MtlXIOUtil.ExportMtlX does not know how to serialize composite materials
+    like MultiSubObject or Shell — it silently drops them, leaving the .mtlx
+    empty for any mesh that ships materials via face-ID submaterials. Work
+    around the Autodesk limitation by recursing through any material that
+    reports `getNumSubMtls > 0` and emitting each submaterial individually.
+    maxUsd's preview-surface writer names preview materials by the same
+    submaterial names, so the bridge's name-based MaterialX relocation still
+    pairs each MTLX Material with the correct preview binding.
+    """
     materials = []
     seen = set()
+
+    def add(material):
+        if not material:
+            return
+
+        try:
+            key = int(mxs.getHandleByAnim(material))
+        except Exception:
+            key = (str(getattr(material, "name", material)),
+                   str(mxs.classOf(material)))
+
+        if key in seen:
+            return
+        seen.add(key)
+
+        try:
+            num_subs = int(mxs.getNumSubMtls(material))
+        except Exception:
+            num_subs = 0
+
+        if num_subs > 0:
+            for i in range(1, num_subs + 1):
+                try:
+                    sub = mxs.getSubMtl(material, i)
+                except Exception:
+                    sub = None
+                add(sub)
+            return
+
+        materials.append(material)
 
     for node in nodes:
         try:
             material = node.material
         except Exception:
             material = None
-        if not material:
-            continue
-
-        try:
-            key = int(mxs.getHandleByAnim(material))
-        except Exception:
-            key = (str(getattr(material, "name", material)), str(mxs.classOf(material)))
-
-        if key in seen:
-            continue
-
-        seen.add(key)
-        materials.append(material)
+        add(material)
 
     return materials
 
@@ -379,9 +409,16 @@ def _export_materialx_sidecar(usd_path, nodes):
     if os.path.exists(temp_path):
         os.remove(temp_path)
 
+    # Default to referencing textures in place (relative paths, no copy) so
+    # that exporting into a project with a shared texture library doesn't
+    # duplicate bitmaps next to every USD. The bulkexporter UI exposes this
+    # as a checkbox ("Reference Textures (no copy)"), and the corresponding
+    # runtime var is _powerusd_reference_textures.
+    reference_textures = bool(_get_runtime_input("_powerusd_reference_textures", True))
+
     mxs.MtlXIOUtil.SetDefaults()
     if mxs.isProperty(mxs.MtlXIOUtil, "CopyTexturesToSaveLocation"):
-        mxs.MtlXIOUtil.CopyTexturesToSaveLocation = True
+        mxs.MtlXIOUtil.CopyTexturesToSaveLocation = not reference_textures
     if mxs.isProperty(mxs.MtlXIOUtil, "UseRelativePaths"):
         mxs.MtlXIOUtil.UseRelativePaths = True
     if mxs.isProperty(mxs.MtlXIOUtil, "ResolveTexturePaths"):
@@ -483,13 +520,54 @@ def _remap_layer_paths_prefix(usd_layer, old_prefix, new_prefix):
         visit(root)
 
 
+def _collect_material_binding_targets(usd_layer):
+    """
+    Walk every relationship spec in the layer and return a map
+    {material_basename: Sdf.Path} of every path that a material:binding points
+    at, skipping anything inside /MaterialX. Used to discover where maxUsd
+    actually placed the preview material scope so the MaterialX relocation
+    can target the exact path the meshes are already bound to.
+
+    For single-object exports maxUsd nests the scope at /<asset>/mtl/, but for
+    multi-object exports (two or more top-level meshes) the scope is shared
+    at the root as /mtl/, so a defaultPrim-based assumption is wrong.
+    """
+    targets = {}
+
+    def visit(prim_spec):
+        for rel_spec in prim_spec.relationships:
+            if rel_spec.name != "material:binding":
+                continue
+            path_list = rel_spec.targetPathList
+            for attr in ("explicitItems", "prependedItems", "appendedItems",
+                         "addedItems", "orderedItems"):
+                for target in getattr(path_list, attr, []):
+                    p = Sdf.Path(target)
+                    if str(p).startswith("/MaterialX"):
+                        continue
+                    targets[p.name] = p
+        for child in prim_spec.nameChildren:
+            visit(child)
+
+    for root in usd_layer.rootPrims:
+        if root.name == "MaterialX":
+            continue
+        visit(root)
+    return targets
+
+
 def _relocate_materialx_under_asset(usd_layer):
     """
     After Sdf.CopySpec brings /MaterialX into the USD layer, the MaterialX
     Materials live at /MaterialX/Materials/<Name> but the meshes are bound to
-    /<asset>/mtl/<Name> (a UsdPreviewSurface-only material emitted by maxUsd).
-    Move each MaterialX Material onto the bound path so the existing
-    material:binding relationships resolve to real MaterialX.
+    preview materials elsewhere in the layer (a UsdPreviewSurface-only
+    Material emitted by maxUsd). Move each MaterialX Material onto the bound
+    path so the existing material:binding relationships resolve to real
+    MaterialX.
+
+    The target path is discovered from live material:binding relationships,
+    not assumed — maxUsd uses /<asset>/mtl/<N> for single-object exports and
+    /mtl/<N> (shared scope at root) for multi-object exports.
 
     /MaterialX/Shaders and /MaterialX/NodeGraphs stay in place — the moved
     Material's child Shader/NodeGraph specs reference them via
@@ -500,27 +578,34 @@ def _relocate_materialx_under_asset(usd_layer):
     paths, but in practice on material subtrees containing referenced
     child shaders it does not — so we remap manually after the move.
     """
-    default_name = usd_layer.defaultPrim
-    if not default_name:
-        return
-    asset_mtl_path = Sdf.Path("/" + default_name + "/mtl")
-
     mtlx_materials_path = Sdf.Path("/MaterialX/Materials")
     mtlx_materials_spec = usd_layer.GetPrimAtPath(mtlx_materials_path)
     if mtlx_materials_spec is None:
         return
 
-    if usd_layer.GetPrimAtPath(asset_mtl_path) is None:
-        scope_spec = Sdf.CreatePrimInLayer(usd_layer, asset_mtl_path)
-        scope_spec.specifier = Sdf.SpecifierDef
-        scope_spec.typeName = "Scope"
+    binding_targets = _collect_material_binding_targets(usd_layer)
+
+    default_name = usd_layer.defaultPrim
+    fallback_mtl_path = None
+    if default_name:
+        fallback_mtl_path = Sdf.Path("/" + default_name + "/mtl")
 
     moves = []
     edit = Sdf.BatchNamespaceEdit()
     for mat_spec in list(mtlx_materials_spec.nameChildren):
         mat_name = mat_spec.name
         src = mtlx_materials_path.AppendChild(mat_name)
-        dst = asset_mtl_path.AppendChild(mat_name)
+        dst = binding_targets.get(mat_name)
+        if dst is None:
+            if fallback_mtl_path is None:
+                print(f"MaterialX bridge: no binding target and no defaultPrim "
+                      f"for {src}, skipping relocation")
+                continue
+            if usd_layer.GetPrimAtPath(fallback_mtl_path) is None:
+                scope_spec = Sdf.CreatePrimInLayer(usd_layer, fallback_mtl_path)
+                scope_spec.specifier = Sdf.SpecifierDef
+                scope_spec.typeName = "Scope"
+            dst = fallback_mtl_path.AppendChild(mat_name)
         existing = usd_layer.GetPrimAtPath(dst)
         if existing is not None:
             edit.Add(dst, Sdf.Path.emptyPath)
@@ -591,6 +676,49 @@ def _inline_materialx_into_usd(usd_path, sidecar_path):
     return True
 
 
+def _postprocess_existing_usd(usd_path, nodes, force_materialx_sidecar,
+                              inline_materialx_into_usd):
+    """
+    Shared post-export pipeline: wrap single-content assets, optionally
+    export a MaterialX sidecar, optionally inline MaterialX into the USD.
+
+    Used by both the bridge-native export path (export_powerusd_asset) and
+    the post-process entry point for files written by the legacy maxUsd
+    exportFile path (postprocess_powerusd_usd). Expects the .usd already
+    exists on disk; opens it, mutates, saves.
+    """
+    # USDExporter writes the fresh file to disk, but a previously cached
+    # Sdf.Layer at the same path (for example from a prior corrupt-state run
+    # that was explicitly cleared) can short-circuit FindOrOpen and yield an
+    # empty in-memory layer — even though the on-disk bytes are correct.
+    # Force a reload so the post-export stage reflects what was just written.
+    existing_layer = Sdf.Layer.Find(usd_path)
+    if existing_layer is not None:
+        existing_layer.Reload(force=True)
+
+    stage = Usd.Stage.Open(usd_path)
+    if stage is None:
+        raise RuntimeError(f"Failed to open exported USD stage: {usd_path}")
+
+    _remove_orphan_preview_nodegraphs(stage)
+    _wrap_single_content_as_asset(stage)
+
+    has_materialx, asset_attrs = _detect_materialx(stage)
+    sidecar_path = None
+    if has_materialx or force_materialx_sidecar or inline_materialx_into_usd:
+        sidecar_path = _export_materialx_sidecar(usd_path, nodes)
+        if sidecar_path and has_materialx:
+            _rewrite_materialx_asset_paths(stage, asset_attrs, sidecar_path)
+    else:
+        print("MaterialX bridge: no MaterialX found in USD, skipping sidecar export")
+
+    # MtlXIOUtil returns False (sidecar_path = None) when nothing MaterialX
+    # is present; in that case the inline step is a no-op and the USD is left
+    # as plain UsdPreviewSurface, which is the desired fallback.
+    if inline_materialx_into_usd and sidecar_path is not None:
+        _inline_materialx_into_usd(usd_path, sidecar_path)
+
+
 def export_powerusd_asset():
     usd_path = _get_runtime_input("_powerusd_export_path", "")
     node_handles = _get_runtime_input("_powerusd_export_node_handles", [])
@@ -620,39 +748,45 @@ def export_powerusd_asset():
     if not ok:
         raise RuntimeError("USDExporter.ExportFile returned false")
 
-    # USDExporter writes the fresh file to disk, but a previously cached
-    # Sdf.Layer at the same path (for example from a prior corrupt-state run
-    # that was explicitly cleared) can short-circuit FindOrOpen and yield an
-    # empty in-memory layer — even though the on-disk bytes are correct.
-    # Force a reload so the post-export stage reflects what was just written.
-    existing_layer = Sdf.Layer.Find(usd_path)
-    if existing_layer is not None:
-        existing_layer.Reload(force=True)
-
-    stage = Usd.Stage.Open(usd_path)
-    if stage is None:
-        raise RuntimeError(f"Failed to open exported USD stage: {usd_path}")
-
-    _remove_orphan_preview_nodegraphs(stage)
-    _wrap_single_content_as_asset(stage)
-
-    has_materialx, asset_attrs = _detect_materialx(stage)
-    sidecar_path = None
-    if has_materialx or force_materialx_sidecar or inline_materialx_into_usd:
-        sidecar_path = _export_materialx_sidecar(usd_path, nodes)
-        if sidecar_path and has_materialx:
-            _rewrite_materialx_asset_paths(stage, asset_attrs, sidecar_path)
-    else:
-        print("MaterialX bridge: no MaterialX found in USD, skipping sidecar export")
-
-    if inline_materialx_into_usd:
-        _inline_materialx_into_usd(usd_path, sidecar_path)
-
+    _postprocess_existing_usd(
+        usd_path, nodes, force_materialx_sidecar, inline_materialx_into_usd
+    )
     return True
 
 
+def postprocess_powerusd_usd():
+    """
+    Entry point for post-processing a USD that was already written by the
+    legacy maxUsd exportFile path (used by powerusd.ms whole-scene export).
+    Runs the same wrap/sidecar/inline pipeline as the bridge export path
+    against the existing file in place. Does not re-export.
+    """
+    usd_path = _get_runtime_input("_powerusd_export_path", "")
+    node_handles = _get_runtime_input("_powerusd_export_node_handles", [])
+    force_materialx_sidecar = bool(_get_runtime_input("_powerusd_force_materialx_sidecar", False))
+    inline_materialx_into_usd = bool(_get_runtime_input("_powerusd_inline_materialx_into_usd", False))
+
+    if not usd_path:
+        raise RuntimeError("Missing _powerusd_export_path")
+    if not os.path.exists(usd_path):
+        raise RuntimeError(f"USD file not found for post-process: {usd_path}")
+
+    nodes = _collect_nodes_from_handles(node_handles)
+    # An empty node list means we can't produce a MaterialX sidecar (no mats
+    # to enumerate); the wrap step still runs.
+    _postprocess_existing_usd(
+        usd_path, nodes, force_materialx_sidecar, inline_materialx_into_usd
+    )
+    return True
+
+
+_mode = str(_get_runtime_input("_powerusd_bridge_mode", "export") or "export").strip()
+
 try:
-    export_powerusd_asset()
+    if _mode == "postprocess":
+        postprocess_powerusd_usd()
+    else:
+        export_powerusd_asset()
     _set_result(True, "")
 except Exception as exc:
     message = f"{exc}\n{traceback.format_exc()}"

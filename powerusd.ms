@@ -135,10 +135,27 @@ fn CloneTools_installUserMacroMirror selfFileName mirrorName =
 
 fn PowerUSD_getScriptsDir =
 (
-	if ::g_CloneTools_ScriptsDir != undefined and ::g_CloneTools_ScriptsDir != "" then
-		::g_CloneTools_ScriptsDir
-	else
-		((getDir #userScripts) + "\\CloneTools\\")
+	-- The install layout places every Clone_USD_* helper flat under
+	-- <userScripts>\CloneTools\, but the repo keeps them one level down in
+	-- <repo>\cloneTools\. Probe candidates in order of preference and return
+	-- whichever one actually contains Clone_USD_HierarchyBuilder.ms (the
+	-- canonical dependency). Falls back to the install path unconditionally.
+	local sentinel = "Clone_USD_HierarchyBuilder.ms"
+	local candidates = #()
+	if ::g_CloneTools_ScriptsDir != undefined and ::g_CloneTools_ScriptsDir != "" do
+	(
+		append candidates ::g_CloneTools_ScriptsDir
+		append candidates (::g_CloneTools_ScriptsDir + "cloneTools\\")
+		append candidates (::g_CloneTools_ScriptsDir + "cloneTools/")
+	)
+	append candidates ((getDir #userScripts) + "\\CloneTools\\")
+
+	local chosen = undefined
+	for c in candidates while chosen == undefined do
+		if doesFileExist (c + sentinel) do chosen = c
+
+	if chosen == undefined then ((getDir #userScripts) + "\\CloneTools\\")
+	else chosen
 )
 
 fn PowerUSD_resolveToolPath fileName =
@@ -280,6 +297,13 @@ buttonText:"Clone PowerUSD UI"
 			checkbox chk_layerFolders "Folders by Layer" checked:false tooltip:"Mirror layer hierarchy into subfolders."
 		)
 
+		group "MaterialX"
+		(
+			checkbox chk_force_mtlx "Force MaterialX Sidecar" checked:false tooltip:"Run the MaterialX postpass on every exported USD. Files without MaterialX content fall back to UsdPreviewSurface with no sidecar written."
+			checkbox chk_inline_mtlx "Inline MaterialX Into USD" checked:false tooltip:"Final postpass: generate MaterialX, compose it into the exported USD, then remove the temporary .mtlx sidecar."
+			checkbox chk_ref_textures "Reference Textures (no copy)" checked:true tooltip:"Emit relative texture paths in MaterialX without copying bitmaps to the export folder.\nUncheck when exporting to a standalone folder that should ship with its own texture set."
+		)
+
 		group "Assembler"
 		(
 			checkbox chk_autoAssemble "Auto Assemble Stage" checked:true tooltip:"Create .usda stage referencing all exports.\nRebuilds hierarchy from metadata."
@@ -394,7 +418,7 @@ buttonText:"Clone PowerUSD UI"
 			local startF = animationRange.start.frame as integer
 			local endF = animationRange.end.frame as integer
 			local fps = frameRate as integer
-			local exportSuccess = ::performBatchExport exportSets outDir false chk_thumbnail.checked startF endF fps useLegacyExport:true
+			local exportSuccess = ::performBatchExport exportSets outDir false chk_thumbnail.checked startF endF fps useLegacyExport:true forceMaterialXSidecar:(chk_force_mtlx.checked or chk_inline_mtlx.checked) inlineMaterialXIntoUsd:chk_inline_mtlx.checked referenceTextures:chk_ref_textures.checked
 
 			if exportSuccess do
 			(
@@ -472,7 +496,7 @@ buttonText:"Clone PowerUSD UI"
 			local startF = animationRange.start.frame as integer
 			local endF = animationRange.end.frame as integer
 			local fps = frameRate as integer
-			local exportSuccess = ::performBatchExport exportSets outDir false chk_thumbnail.checked startF endF fps useLegacyExport:true
+			local exportSuccess = ::performBatchExport exportSets outDir false chk_thumbnail.checked startF endF fps useLegacyExport:true forceMaterialXSidecar:(chk_force_mtlx.checked or chk_inline_mtlx.checked) inlineMaterialXIntoUsd:chk_inline_mtlx.checked referenceTextures:chk_ref_textures.checked
 
 			if exportSuccess do
 			(

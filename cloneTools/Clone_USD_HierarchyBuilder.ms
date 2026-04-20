@@ -440,7 +440,7 @@ fn pythonListFromNodeHandles nodes =
 	out
 )
 
-fn exportUsdViaPythonBridge filePath nodes startFrame endFrame fps forceMaterialXSidecar:false inlineMaterialXIntoUsd:false =
+fn exportUsdViaPythonBridge filePath nodes startFrame endFrame fps forceMaterialXSidecar:false inlineMaterialXIntoUsd:false referenceTextures:true =
 (
 	local bridgeDir = if g_PowerUSD_HierarchyBuilderDir != undefined and g_PowerUSD_HierarchyBuilderDir != "" then g_PowerUSD_HierarchyBuilderDir else ""
 	if bridgeDir == "" and isFunction ::PowerUSD_getScriptsDir do bridgeDir = (::PowerUSD_getScriptsDir() + "cloneTools\\")
@@ -471,6 +471,7 @@ fn exportUsdViaPythonBridge filePath nodes startFrame endFrame fps forceMaterial
 	python.Execute ("import pymxs; pymxs.runtime._powerusd_export_fps = " + ((fps as integer) as string))
 	python.Execute ("import pymxs; pymxs.runtime._powerusd_force_materialx_sidecar = " + (if forceMaterialXSidecar then "True" else "False"))
 	python.Execute ("import pymxs; pymxs.runtime._powerusd_inline_materialx_into_usd = " + (if inlineMaterialXIntoUsd then "True" else "False"))
+	python.Execute ("import pymxs; pymxs.runtime._powerusd_reference_textures = " + (if referenceTextures then "True" else "False"))
 	python.Execute "import pymxs; pymxs.runtime.g_PowerUSD_PythonExportOk = False; pymxs.runtime.g_PowerUSD_PythonExportError = ''"
 
 	try
@@ -486,6 +487,62 @@ fn exportUsdViaPythonBridge filePath nodes startFrame endFrame fps forceMaterial
 	(
 		local errMsg = if g_PowerUSD_PythonExportError != undefined and g_PowerUSD_PythonExportError != "" then g_PowerUSD_PythonExportError else "Unknown Python export error"
 		format "Python USD export FAILED: %\n" errMsg
+	)
+
+	g_PowerUSD_PythonExportOk == true
+)
+
+-- Run the bridge's post-process pipeline (asset wrap + MaterialX sidecar +
+-- optional inline) against an already-written USD from the legacy maxUsd
+-- exportFile path. Leaves USDs without MaterialX untouched aside from the
+-- wrap step — MtlXIOUtil itself fails silently when no MTLX content exists.
+fn postprocessUsdViaPythonBridge filePath nodes forceMaterialXSidecar:false inlineMaterialXIntoUsd:false referenceTextures:true =
+(
+	local bridgeDir = if g_PowerUSD_HierarchyBuilderDir != undefined and g_PowerUSD_HierarchyBuilderDir != "" then g_PowerUSD_HierarchyBuilderDir else ""
+	if bridgeDir == "" and isFunction ::PowerUSD_getScriptsDir do bridgeDir = (::PowerUSD_getScriptsDir() + "cloneTools\\")
+
+	local bridgePath = bridgeDir + "Clone_USD_ExportBridge.py"
+	if not doesFileExist bridgePath then
+	(
+		local altBridgePath = (::PowerUSD_getScriptsDir() + "Clone_USD_ExportBridge.py")
+		if doesFileExist altBridgePath then bridgePath = altBridgePath
+		else
+		(
+			format "USD postprocess FAILED: missing bridge script %\n" bridgePath
+			return false
+		)
+	)
+
+	local nodeHandlesPy = pythonListFromNodeHandles nodes
+	local safeFilePath = pythonEscapeString filePath
+
+	global g_PowerUSD_PythonExportOk = false
+	global g_PowerUSD_PythonExportError = ""
+
+	python.Execute ("import pymxs; pymxs.runtime._powerusd_bridge_mode = 'postprocess'")
+	python.Execute ("import pymxs; pymxs.runtime._powerusd_export_path = r'" + safeFilePath + "'")
+	python.Execute ("import pymxs; pymxs.runtime._powerusd_export_node_handles = " + nodeHandlesPy)
+	python.Execute ("import pymxs; pymxs.runtime._powerusd_force_materialx_sidecar = " + (if forceMaterialXSidecar then "True" else "False"))
+	python.Execute ("import pymxs; pymxs.runtime._powerusd_inline_materialx_into_usd = " + (if inlineMaterialXIntoUsd then "True" else "False"))
+	python.Execute ("import pymxs; pymxs.runtime._powerusd_reference_textures = " + (if referenceTextures then "True" else "False"))
+	python.Execute "import pymxs; pymxs.runtime.g_PowerUSD_PythonExportOk = False; pymxs.runtime.g_PowerUSD_PythonExportError = ''"
+
+	try
+	(
+		python.ExecuteFile bridgePath
+	)
+	catch
+	(
+		g_PowerUSD_PythonExportError = getCurrentException() as string
+	)
+
+	-- Reset to default so a subsequent bridge call runs full export, not postprocess
+	python.Execute "import pymxs; pymxs.runtime._powerusd_bridge_mode = 'export'"
+
+	if g_PowerUSD_PythonExportOk != true do
+	(
+		local errMsg = if g_PowerUSD_PythonExportError != undefined and g_PowerUSD_PythonExportError != "" then g_PowerUSD_PythonExportError else "Unknown post-process error"
+		format "USD postprocess FAILED: %\n" errMsg
 	)
 
 	g_PowerUSD_PythonExportOk == true
@@ -1046,7 +1103,7 @@ fn convertGroupsToDummies nodeArray =
 )
 
 -- Batch export a list of ExportNodeData sets to USD files
-fn performBatchExport exportSets outDir useOrigin useThumbnails startFrame endFrame fps useLegacyExport:false forceMaterialXSidecar:false inlineMaterialXIntoUsd:false =
+fn performBatchExport exportSets outDir useOrigin useThumbnails startFrame endFrame fps useLegacyExport:false forceMaterialXSidecar:false inlineMaterialXIntoUsd:false referenceTextures:true =
 (
 	if exportSets.count > 0 then
 	(
@@ -1101,10 +1158,20 @@ fn performBatchExport exportSets outDir useOrigin useThumbnails startFrame endFr
 								(
 									result = exportFile filePath #noPrompt selectedOnly:true
 								)
+
+								-- Legacy exportFile produces the USD but can't wrap assets
+								-- or emit MaterialX. Run the bridge's post-process pipeline
+								-- against the written file only if the caller actually
+								-- asked for wrap/MaterialX work — otherwise leave the
+								-- Unreal-tuned legacy output untouched.
+								if result != false and (forceMaterialXSidecar or inlineMaterialXIntoUsd) do
+								(
+									postprocessUsdViaPythonBridge filePath item.rootNodes forceMaterialXSidecar:forceMaterialXSidecar inlineMaterialXIntoUsd:inlineMaterialXIntoUsd referenceTextures:referenceTextures
+								)
 							)
 							else
 							(
-								result = exportUsdViaPythonBridge filePath item.rootNodes startFrame endFrame fps forceMaterialXSidecar:forceMaterialXSidecar inlineMaterialXIntoUsd:inlineMaterialXIntoUsd
+								result = exportUsdViaPythonBridge filePath item.rootNodes startFrame endFrame fps forceMaterialXSidecar:forceMaterialXSidecar inlineMaterialXIntoUsd:inlineMaterialXIntoUsd referenceTextures:referenceTextures
 								if result == false and i == 1 do abortBatch = true
 							)
 

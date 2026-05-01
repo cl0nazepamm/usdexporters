@@ -319,7 +319,6 @@ buttonText:"Author USD"
 	dotNet.addEventHandler chk_hierarchy "CheckedChanged" onHierarchyChanged
 	dotNet.addEventHandler btn_export_sets "Click" onExportSets
 	dotNet.addEventHandler btn_export "Click" onExportSelected
-	append CloneUI_handlers #(onLayersChanged, onHierarchyChanged, onExportSets, onExportSelected)
 	frm.Show()
 )
 

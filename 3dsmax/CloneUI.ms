@@ -4,10 +4,41 @@ global CloneUI_drag
 global CloneUI_dragPt
 global CloneUI_dragForm
 
-if CloneUI_handlers == undefined do CloneUI_handlers = #()
+CloneUI_handlers = #()
 CloneUI_drag = false
 CloneUI_dragPt = undefined
 CloneUI_dragForm = undefined
+
+fn CloneUI_releaseImages ctrl =
+(
+	try
+	(
+		if ((ctrl.GetType()).FullName as string) == "System.Windows.Forms.PictureBox" do
+		(
+			local img = ctrl.Image
+			if img != undefined do
+			(
+				try(ctrl.Image = undefined)catch()
+				try(img.Dispose())catch()
+			)
+		)
+	)
+	catch()
+
+	try
+	(
+		for i = 0 to (ctrl.Controls.Count - 1) do CloneUI_releaseImages (ctrl.Controls.Item[i])
+	)
+	catch()
+)
+
+fn CloneUI_onFormClosed s e =
+(
+	CloneUI_releaseImages s
+	CloneUI_drag = false
+	CloneUI_dragPt = undefined
+	if CloneUI_dragForm == s do CloneUI_dragForm = undefined
+)
 
 fn CloneUI_onClose s e =
 (
@@ -104,19 +135,39 @@ struct CloneUIStruct
 	fNorm = dotNetObject "System.Drawing.Font" "Segoe UI" 8.5 (dotNetClass "System.Drawing.FontStyle").Regular,
 	fSmall = dotNetObject "System.Drawing.Font" "Segoe UI" 7.5 (dotNetClass "System.Drawing.FontStyle").Regular,
 
-	fn logoPath =
+	fn logoPath toolTitle:"" =
 	(
 		local candidates = #()
 		local sourceDir = try(getFilenamePath (getSourceFileName()))catch("")
-		if sourceDir != undefined and sourceDir != "" do
+		local isPowerUSD = matchPattern (toLower (toolTitle as string)) pattern:"*usd*"
+		if isPowerUSD then
 		(
-			append candidates (sourceDir + "icons\\powerusd_logo.png")
-			append candidates (sourceDir + "powerusd_logo.png")
+			if sourceDir != undefined and sourceDir != "" do
+			(
+				append candidates (sourceDir + "icons\\powerusd_logo.png")
+				append candidates (sourceDir + "powerusd_logo.png")
+			)
+			append candidates ((getDir #userScripts) + "\\CloneTools\\powerusd_logo.png")
+			append candidates ((getDir #userIcons) + "\\PowerUSD\\powerusd_logo.png")
+			append candidates @"C:\Users\ogulc\Clone Library\ClonePipeline\powerusdexporter\3dsmax\icons\powerusd_logo.png"
+			append candidates @"C:\Users\ogulc\Clone Library\ClonePipeline\powerusdexporter\docs\Logo.png"
 		)
-		append candidates ((getDir #userScripts) + "\\CloneTools\\powerusd_logo.png")
-		append candidates ((getDir #userIcons) + "\\PowerUSD\\powerusd_logo.png")
-		append candidates @"C:\Users\ogulc\Clone Library\ClonePipeline\powerusdexporter\3dsmax\icons\powerusd_logo.png"
-		append candidates @"C:\Users\ogulc\Clone Library\ClonePipeline\powerusdexporter\docs\Logo.png"
+		else
+		(
+			if sourceDir != undefined and sourceDir != "" do append candidates (sourceDir + "images\\Logo.png")
+			append candidates ((getDir #userScripts) + "\\CloneTools\\images\\Logo.png")
+			append candidates @"C:\Users\ogulc\Clone Library\ClonePipeline\clone-maxscripts\images\Logo.png"
+		)
+		if not isPowerUSD do
+		(
+			append candidates ((getDir #userScripts) + "\\CloneTools\\powerusd_logo.png")
+			append candidates @"C:\Users\ogulc\Clone Library\ClonePipeline\powerusdexporter\3dsmax\icons\powerusd_logo.png"
+		)
+		if isPowerUSD do
+		(
+			append candidates ((getDir #userScripts) + "\\CloneTools\\images\\Logo.png")
+			append candidates @"C:\Users\ogulc\Clone Library\ClonePipeline\clone-maxscripts\images\Logo.png"
+		)
 		for p in candidates where doesFileExist p do return p
 		""
 	),
@@ -232,7 +283,7 @@ struct CloneUIStruct
 		pic.BackColor = cBg
 		try
 		(
-			local lp = logoPath()
+			local lp = logoPath toolTitle:toolTitle
 			if lp != "" and doesFileExist lp do
 			(
 				local fs = dotNetObject "System.IO.FileStream" lp (dotNetClass "System.IO.FileMode").Open (dotNetClass "System.IO.FileAccess").Read (dotNetClass "System.IO.FileShare").ReadWrite
@@ -268,13 +319,13 @@ struct CloneUIStruct
 		dotNet.addEventHandler xBtn "MouseEnter" CloneUI_onXEnter
 		dotNet.addEventHandler xBtn "MouseLeave" CloneUI_onXLeave
 		dotNet.addEventHandler frm "KeyUp" CloneUI_onKey
+		dotNet.addEventHandler frm "FormClosed" CloneUI_onFormClosed
 		CloneUI_addDrag frm
 		CloneUI_addDrag logoP
 		CloneUI_addDrag pic
 		CloneUI_addDrag vLbl
 		CloneUI_addDrag titleLbl
 		CloneUI_addDrag xBtn
-		append CloneUI_handlers #(CloneUI_onClose, CloneUI_onXEnter, CloneUI_onXLeave, CloneUI_onPaint, CloneUI_onDragDown, CloneUI_onDragMove, CloneUI_onDragUp, CloneUI_onKey, CloneUI_addDrag)
 		#(pad, iW, contentY + 42)
 	)
 )

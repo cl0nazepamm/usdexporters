@@ -550,7 +550,6 @@ buttonText:"Clone PowerUSD UI"
 	dotNet.addEventHandler btn_genProxy "Click" onGenerateProxy
 	dotNet.addEventHandler btn_export_sets "Click" onExportSets
 	dotNet.addEventHandler btn_export "Click" onExportSelected
-	append CloneUI_handlers #(onAdvancedSingleChanged, onRootPrimChanged, onHierarchyFoldersChanged, onLayerFoldersChanged, onGenerateProxy, onExportSets, onExportSelected)
 	frm.Show()
 )
 

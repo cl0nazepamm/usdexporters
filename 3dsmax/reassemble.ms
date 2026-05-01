@@ -229,7 +229,6 @@ buttonText:"Clone PowerUSD Reassemble"
 	dotNet.addEventHandler btn_browse "Click" onBrowseReassemble
 	dotNet.addEventHandler btn_dryHierarchy "Click" onDryHierarchy
 	dotNet.addEventHandler btn_assemble "Click" onAssemble
-	append CloneUI_handlers #(onRootPrimChanged, onBrowseReassemble, onDryHierarchy, onAssemble)
 	frm.Show()
 )
 

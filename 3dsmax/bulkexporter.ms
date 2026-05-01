@@ -5,8 +5,8 @@ global g_CloneTools_ScriptsDir
 fn PowerUSD_getScriptsDir =
 (
 	-- The install layout places every Clone_USD_* helper flat under
-	-- <userScripts>/CloneTools/, but the repo keeps them one level down in
-	-- <repo>/cloneTools/. Probe candidates in order of preference and return
+	-- <userScripts>/CloneTools/. The repo keeps them beside this script in
+	-- 3dsmax/cloneTools/. Probe candidates in order of preference and return
 	-- whichever one actually contains Clone_USD_HierarchyBuilder.ms (the
 	-- canonical dependency). Falls back to the install path unconditionally.
 	local sentinel = "Clone_USD_HierarchyBuilder.ms"

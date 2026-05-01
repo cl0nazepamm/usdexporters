@@ -57,6 +57,8 @@ fn AuthorUSD_InstallStartupLoader =
 		if doesFileExist destPath do deleteFile destPath
 		copyFile sourceFile destPath
 	)
+	if doesFileExist (sourceDir + "CloneUI.ms") do copyFile (sourceDir + "CloneUI.ms") (targetDir + "CloneUI.ms")
+	if doesFileExist (sourceDir + "icons\\powerusd_logo.png") do copyFile (sourceDir + "icons\\powerusd_logo.png") (targetDir + "powerusd_logo.png")
 
 	local userMacrosDir = getDir #userMacros
 	if userMacrosDir != undefined and userMacrosDir != "" and AuthorUSD_isWritableDir userMacrosDir do (
@@ -109,198 +111,216 @@ buttonText:"Author USD"
 (
 	persistent global g_PowerUSD_lastDir
 
-	rollout rBulkUSD "Author USD" width:240
+	try(if CloneUI == undefined do fileIn ((getDir #userScripts) + "\\CloneTools\\CloneUI.ms"))catch(fileIn (PowerUSD_getScriptsDir() + "CloneUI.ms"))
+	try(PowerUSDBulkExport_Form.Close())catch()
+	try(PowerUSDBulkExport_Form.Dispose())catch()
+	global PowerUSDBulkExport_Form = dotNetObject "System.Windows.Forms.Form"
+
+	local frm = CloneUI.skinForm PowerUSDBulkExport_Form "Author USD" 360 560
+	local shell = CloneUI.addShell frm "Author USD" version:"v1.0"
+	local pad = shell[1]
+	local iW = shell[2]
+	local Y = shell[3]
+
+	frm.controls.add (CloneUI.mkLabel "GROUPING" pad Y iW 18 fObj:CloneUI.fBold cObj:CloneUI.cHead); Y += 26
+	local chk_layers = CloneUI.mkCheck "By Layers" (pad+4) Y 140 chk:false
+	local chk_hierarchy = CloneUI.mkCheck "By Hierarchies" (pad+164) Y 160 chk:true
+	frm.controls.add chk_layers
+	frm.controls.add chk_hierarchy
+	Y += 38
+
+	frm.controls.add (CloneUI.mkSep pad Y iW); Y += 12
+	frm.controls.add (CloneUI.mkLabel "OPTIONS" pad Y iW 18 fObj:CloneUI.fBold cObj:CloneUI.cHead); Y += 26
+	local chk_origin = CloneUI.mkCheck "Move to Origin" (pad+4) Y 150 chk:false
+	local chk_thumbnail = CloneUI.mkCheck "Generate Thumbnails" (pad+164) Y 170 chk:false
+	frm.controls.add chk_origin
+	frm.controls.add chk_thumbnail
+	Y += 28
+	local chk_force_mtlx = CloneUI.mkCheck "Force MaterialX Sidecar" (pad+4) Y 220 chk:false
+	frm.controls.add chk_force_mtlx
+	Y += 28
+	local chk_inline_mtlx = CloneUI.mkCheck "Inline MaterialX Into USD" (pad+4) Y 230 chk:false
+	frm.controls.add chk_inline_mtlx
+	Y += 28
+	local chk_ref_textures = CloneUI.mkCheck "Reference Textures (no copy)" (pad+4) Y 245 chk:true
+	frm.controls.add chk_ref_textures
+	Y += 42
+
+	local btn_export = CloneUI.mkBtn "EXPORT SELECTED" pad Y iW 38
+	local btn_export_sets = CloneUI.mkBtn "EXPORT SELECTION SETS" pad (Y + 46) iW 30
+	frm.controls.add btn_export
+	frm.controls.add btn_export_sets
+	Y += 96
+
+	local credit = CloneUI.mkLabel "clone" 0 Y 360 16 fObj:CloneUI.fSmall cObj:(CloneUI.clr.FromArgb 55 55 55)
+	credit.TextAlign = CloneUI.alC.MiddleCenter
+	frm.controls.add credit
+	frm.Size = dotNetObject CloneUI.szC 360 (Y + 24)
+
+	fn onLayersChanged s e = (if chk_layers.Checked do chk_hierarchy.Checked = false)
+	fn onHierarchyChanged s e = (if chk_hierarchy.Checked do chk_layers.Checked = false)
+
+	fn runPowerUSDPrep =
 	(
-		bitmap bmp_logo "Logo" fileName:"" height:50 width:220 align:#center
+		local scriptsDir = PowerUSD_getScriptsDir()
+		if doesFileExist (scriptsDir + "Clone_USD_CleanStruct.py") do python.ExecuteFile (scriptsDir + "Clone_USD_CleanStruct.py")
+		if doesFileExist (scriptsDir + "Clone_USD_usdWrapper.py") do python.ExecuteFile (scriptsDir + "Clone_USD_usdWrapper.py")
+		if doesFileExist (scriptsDir + "Clone_USD_PropertiesChaser.py") do python.ExecuteFile (scriptsDir + "Clone_USD_PropertiesChaser.py")
+	)
 
-		group "Grouping"
+	fn onExportSets s e =
+	(
+		fileIn (PowerUSD_getScriptsDir() + "Clone_USD_HierarchyBuilder.ms")
+		if selectionSets.count == 0 then (messageBox "No Selection Sets found."; return false)
+
+		if g_PowerUSD_lastDir == undefined do g_PowerUSD_lastDir = (getDir #export)
+		local outDir = getSavePath caption:"Select Output Directory" initialDir:g_PowerUSD_lastDir
+		if outDir == undefined do return false
+		g_PowerUSD_lastDir = outDir
+
+		runPowerUSDPrep()
+
+		local exportSets = #()
+		for i = 1 to selectionSets.count do
 		(
-			checkbox chk_layers "By Layers" checked:false tooltip:"One USD file per Layer."
-			checkbox chk_hierarchy "By Hierarchies" checked:true tooltip:"One USD file per Hierarchy Root."
+			local setName = getNamedSelSetName i
+			local setNodes = for obj in selectionSets[i] collect obj
+			if setNodes.count > 0 do
+				append exportSets (::ExportNodeData exportName:setName rootNodes:setNodes moveRoot:undefined subFolder:undefined parentName:undefined)
 		)
+		exportSets = ::partitionCamerasToSingleExport exportSets cameraFileName:"Cameras"
+		exportSets = ::bundleCameraTargetsInExportSets exportSets
 
-		group "Options"
+		local currentSel = selection as array
+		local startF = animationRange.start.frame as integer
+		local endF = animationRange.end.frame as integer
+		local fps = frameRate as integer
+		local exportSuccess = ::performBatchExport exportSets outDir chk_origin.Checked chk_thumbnail.Checked startF endF fps forceMaterialXSidecar:(chk_force_mtlx.Checked or chk_inline_mtlx.Checked) inlineMaterialXIntoUsd:chk_inline_mtlx.Checked referenceTextures:chk_ref_textures.Checked
+
+		if exportSuccess do
 		(
-			checkbox chk_origin "Move to Origin" checked:false tooltip:"Temporarily moves root to 0,0,0 for export."
-			checkbox chk_thumbnail "Generate Thumbnails" checked:false tooltip:"Render a thumbnail for each exported asset."
-			checkbox chk_force_mtlx "Force MaterialX Sidecar" checked:false tooltip:"Always write a .mtlx sidecar next to each exported USD, even when the USD only contains UsdPreviewSurface."
-			checkbox chk_inline_mtlx "Inline MaterialX Into USD" checked:false tooltip:"Final postpass: generate MaterialX, compose it into the exported USD, then remove the temporary .mtlx sidecar."
-			checkbox chk_ref_textures "Reference Textures (no copy)" checked:true tooltip:"Emit relative texture paths in MaterialX without copying bitmaps to the export folder.\nUncheck when exporting to a standalone folder that should ship with its own texture set."
-		)
-
-		button btn_export "EXPORT SELECTED" width:200 height:40 highlightColor:(color 0 200 0)
-		button btn_export_sets "EXPORT SELECTION SETS" width:200 height:30
-
-		on chk_layers changed state do
-			if state do chk_hierarchy.checked = false
-
-		on chk_hierarchy changed state do
-			if state do chk_layers.checked = false
-
-		on rBulkUSD open do
-		(
-			local iconsDir = GetDir #userIcons
-			local logoPath = iconsDir + "\\PowerUSD\\powerusd_logo.png"
-			if doesFileExist logoPath do bmp_logo.fileName = logoPath
-		)
-
-		on btn_export_sets pressed do
-		(
-			fileIn (PowerUSD_getScriptsDir() + "Clone_USD_HierarchyBuilder.ms")
-			if selectionSets.count == 0 then (messageBox "No Selection Sets found."; return false)
-
-			if g_PowerUSD_lastDir == undefined do g_PowerUSD_lastDir = (getDir #export)
-			local outDir = getSavePath caption:"Select Output Directory" initialDir:g_PowerUSD_lastDir
-			if outDir == undefined do return false
-			g_PowerUSD_lastDir = outDir
-
-			local scriptsDir = PowerUSD_getScriptsDir()
-			if doesFileExist (scriptsDir + "Clone_USD_CleanStruct.py") do python.ExecuteFile (scriptsDir + "Clone_USD_CleanStruct.py")
-			if doesFileExist (scriptsDir + "Clone_USD_usdWrapper.py") do python.ExecuteFile (scriptsDir + "Clone_USD_usdWrapper.py")
-			if doesFileExist (scriptsDir + "Clone_USD_PropertiesChaser.py") do python.ExecuteFile (scriptsDir + "Clone_USD_PropertiesChaser.py")
-
-			local exportSets = #()
-			for i = 1 to selectionSets.count do
-			(
-				local setName = getNamedSelSetName i
-				local setNodes = for obj in selectionSets[i] collect obj
-				if setNodes.count > 0 do
-					append exportSets (::ExportNodeData exportName:setName rootNodes:setNodes moveRoot:undefined subFolder:undefined parentName:undefined)
-			)
-			exportSets = ::partitionCamerasToSingleExport exportSets cameraFileName:"Cameras"
-			exportSets = ::bundleCameraTargetsInExportSets exportSets
-
-			local currentSel = selection as array
-			local startF = animationRange.start.frame as integer
-			local endF = animationRange.end.frame as integer
-			local fps = frameRate as integer
-			local exportSuccess = ::performBatchExport exportSets outDir chk_origin.checked chk_thumbnail.checked startF endF fps forceMaterialXSidecar:(chk_force_mtlx.checked or chk_inline_mtlx.checked) inlineMaterialXIntoUsd:chk_inline_mtlx.checked referenceTextures:chk_ref_textures.checked
-
-			if exportSuccess do
-			(
-				select currentSel
-				format "\n=== Author USD Export Complete ===\n"
-			)
-		)
-
-		on btn_export pressed do
-		(
-			fileIn (PowerUSD_getScriptsDir() + "Clone_USD_HierarchyBuilder.ms")
-			local rawSelection = selection as array
-			if rawSelection.count == 0 then (messageBox "No objects selected."; return false)
-
-			if g_PowerUSD_lastDir == undefined do g_PowerUSD_lastDir = (getDir #export)
-			local outDir = getSavePath caption:"Select Output Directory" initialDir:g_PowerUSD_lastDir
-			if outDir == undefined do return false
-			g_PowerUSD_lastDir = outDir
-
-			local scriptsDir = PowerUSD_getScriptsDir()
-			if doesFileExist (scriptsDir + "Clone_USD_CleanStruct.py") do python.ExecuteFile (scriptsDir + "Clone_USD_CleanStruct.py")
-			if doesFileExist (scriptsDir + "Clone_USD_usdWrapper.py") do python.ExecuteFile (scriptsDir + "Clone_USD_usdWrapper.py")
-			if doesFileExist (scriptsDir + "Clone_USD_PropertiesChaser.py") do python.ExecuteFile (scriptsDir + "Clone_USD_PropertiesChaser.py")
-
-			local exportSets = #()
-
-			-- LAYERS: all objects on layer exported together
-			if chk_layers.checked then
-			(
-				local layerNames = #()
-
-				for obj in rawSelection do
-				(
-					local lName = obj.layer.name
-					if findItem layerNames lName == 0 do append layerNames lName
-				)
-
-				for lName in layerNames do
-				(
-					local layer = LayerManager.getLayerFromName lName
-					local layerNodes = #()
-					layer.nodes &layerNodes
-
-					append exportSets (::ExportNodeData exportName:lName rootNodes:layerNodes moveRoot:undefined subFolder:undefined parentName:undefined)
-				)
-			)
-			-- HIERARCHIES: entire hierarchy exported together
-			else if chk_hierarchy.checked then
-			(
-				local processedRoots = #()
-
-				for obj in rawSelection do
-				(
-					local root = ::getHierarchyRoot obj
-					if findItem processedRoots root == 0 do
-					(
-						append processedRoots root
-						local fullTree = ::getAllDescendants root
-
-						append exportSets (::ExportNodeData exportName:root.name rootNodes:fullTree moveRoot:root subFolder:undefined parentName:undefined)
-					)
-				)
-			)
-			-- STANDARD: individual objects/groups, instances exported together
-			else
-			(
-				local groupsProcessed = #()
-				local geometryObjects = #()
-				local groupObjects = #()
-
-				for obj in rawSelection do
-				(
-					if isGroupMember obj then
-					(
-						local grpHead = obj
-						while (isGroupMember grpHead) do grpHead = grpHead.parent
-						if findItem groupsProcessed grpHead == 0 do
-						(
-							append groupsProcessed grpHead
-							append groupObjects grpHead
-						)
-					)
-					else if isGroupHead obj then
-					(
-						if findItem groupsProcessed obj == 0 do
-						(
-							append groupsProcessed obj
-							append groupObjects obj
-						)
-					)
-					else
-					(
-						append geometryObjects obj
-					)
-				)
-
-				for grp in groupObjects do
-					append exportSets (::ExportNodeData exportName:grp.name rootNodes:#(grp) moveRoot:grp subFolder:undefined parentName:undefined)
-
-				local instanceGroups = ::groupByInstances geometryObjects
-
-				for group in instanceGroups do
-				(
-					local master = ::selectMasterInstance group
-					append exportSets (::ExportNodeData exportName:master.name rootNodes:group moveRoot:master subFolder:undefined parentName:undefined)
-				)
-			)
-
-			exportSets = ::partitionCamerasToSingleExport exportSets cameraFileName:"Cameras"
-			exportSets = ::bundleCameraTargetsInExportSets exportSets
-
-			local currentSel = selection as array
-			local startF = animationRange.start.frame as integer
-			local endF = animationRange.end.frame as integer
-			local fps = frameRate as integer
-			local exportSuccess = ::performBatchExport exportSets outDir chk_origin.checked chk_thumbnail.checked startF endF fps forceMaterialXSidecar:(chk_force_mtlx.checked or chk_inline_mtlx.checked) inlineMaterialXIntoUsd:chk_inline_mtlx.checked referenceTextures:chk_ref_textures.checked
-
-			if exportSuccess do
-			(
-				select rawSelection
-				format "\n=== Author USD Export Complete ===\n"
-			)
+			select currentSel
+			format "\n=== Author USD Export Complete ===\n"
 		)
 	)
 
-	createDialog rBulkUSD
+	fn onExportSelected s e =
+	(
+		fileIn (PowerUSD_getScriptsDir() + "Clone_USD_HierarchyBuilder.ms")
+		local rawSelection = selection as array
+		if rawSelection.count == 0 then (messageBox "No objects selected."; return false)
+
+		if g_PowerUSD_lastDir == undefined do g_PowerUSD_lastDir = (getDir #export)
+		local outDir = getSavePath caption:"Select Output Directory" initialDir:g_PowerUSD_lastDir
+		if outDir == undefined do return false
+		g_PowerUSD_lastDir = outDir
+
+		runPowerUSDPrep()
+
+		local exportSets = #()
+
+		-- LAYERS: all objects on layer exported together
+		if chk_layers.Checked then
+		(
+			local layerNames = #()
+
+			for obj in rawSelection do
+			(
+				local lName = obj.layer.name
+				if findItem layerNames lName == 0 do append layerNames lName
+			)
+
+			for lName in layerNames do
+			(
+				local layer = LayerManager.getLayerFromName lName
+				local layerNodes = #()
+				layer.nodes &layerNodes
+				append exportSets (::ExportNodeData exportName:lName rootNodes:layerNodes moveRoot:undefined subFolder:undefined parentName:undefined)
+			)
+		)
+		-- HIERARCHIES: entire hierarchy exported together
+		else if chk_hierarchy.Checked then
+		(
+			local processedRoots = #()
+
+			for obj in rawSelection do
+			(
+				local root = ::getHierarchyRoot obj
+				if findItem processedRoots root == 0 do
+				(
+					append processedRoots root
+					local fullTree = ::getAllDescendants root
+					append exportSets (::ExportNodeData exportName:root.name rootNodes:fullTree moveRoot:root subFolder:undefined parentName:undefined)
+				)
+			)
+		)
+		-- STANDARD: individual objects/groups, instances exported together
+		else
+		(
+			local groupsProcessed = #()
+			local geometryObjects = #()
+			local groupObjects = #()
+
+			for obj in rawSelection do
+			(
+				if isGroupMember obj then
+				(
+					local grpHead = obj
+					while (isGroupMember grpHead) do grpHead = grpHead.parent
+					if findItem groupsProcessed grpHead == 0 do
+					(
+						append groupsProcessed grpHead
+						append groupObjects grpHead
+					)
+				)
+				else if isGroupHead obj then
+				(
+					if findItem groupsProcessed obj == 0 do
+					(
+						append groupsProcessed obj
+						append groupObjects obj
+					)
+				)
+				else
+				(
+					append geometryObjects obj
+				)
+			)
+
+			for grp in groupObjects do
+				append exportSets (::ExportNodeData exportName:grp.name rootNodes:#(grp) moveRoot:grp subFolder:undefined parentName:undefined)
+
+			local instanceGroups = ::groupByInstances geometryObjects
+
+			for group in instanceGroups do
+			(
+				local master = ::selectMasterInstance group
+				append exportSets (::ExportNodeData exportName:master.name rootNodes:group moveRoot:master subFolder:undefined parentName:undefined)
+			)
+		)
+
+		exportSets = ::partitionCamerasToSingleExport exportSets cameraFileName:"Cameras"
+		exportSets = ::bundleCameraTargetsInExportSets exportSets
+
+		local currentSel = selection as array
+		local startF = animationRange.start.frame as integer
+		local endF = animationRange.end.frame as integer
+		local fps = frameRate as integer
+		local exportSuccess = ::performBatchExport exportSets outDir chk_origin.Checked chk_thumbnail.Checked startF endF fps forceMaterialXSidecar:(chk_force_mtlx.Checked or chk_inline_mtlx.Checked) inlineMaterialXIntoUsd:chk_inline_mtlx.Checked referenceTextures:chk_ref_textures.Checked
+
+		if exportSuccess do
+		(
+			select rawSelection
+			format "\n=== Author USD Export Complete ===\n"
+		)
+	)
+
+	dotNet.addEventHandler chk_layers "CheckedChanged" onLayersChanged
+	dotNet.addEventHandler chk_hierarchy "CheckedChanged" onHierarchyChanged
+	dotNet.addEventHandler btn_export_sets "Click" onExportSets
+	dotNet.addEventHandler btn_export "Click" onExportSelected
+	append CloneUI_handlers #(onLayersChanged, onHierarchyChanged, onExportSets, onExportSelected)
+	frm.Show()
 )
 
 (

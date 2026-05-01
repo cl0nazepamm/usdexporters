@@ -39,6 +39,9 @@ fn Reassemble_InstallStartupLoader =
 		if doesFileExist destPath do deleteFile destPath
 		copyFile sourceFile destPath
 	)
+	local sourceDir = getFilenamePath sourceFile
+	if doesFileExist (sourceDir + "CloneUI.ms") do copyFile (sourceDir + "CloneUI.ms") (targetDir + "CloneUI.ms")
+	if doesFileExist (sourceDir + "icons\\powerusd_logo.png") do copyFile (sourceDir + "icons\\powerusd_logo.png") (targetDir + "powerusd_logo.png")
 
 	local userMacrosDir = getDir #userMacros
 	if userMacrosDir != undefined and userMacrosDir != "" and Reassemble_isWritableDir userMacrosDir do (
@@ -81,151 +84,153 @@ category:"CloneTools"
 toolTip:"Reassemble USD Stage from exported files"
 buttonText:"Clone PowerUSD Reassemble"
 (
-	rollout rReassemble "PowerUSD Reassemble" width:280
+	try(if CloneUI == undefined do fileIn ((getDir #userScripts) + "\\CloneTools\\CloneUI.ms"))catch(fileIn (PowerUSD_getScriptsDir() + "CloneUI.ms"))
+	try(PowerUSDReassemble_Form.Close())catch()
+	try(PowerUSDReassemble_Form.Dispose())catch()
+	global PowerUSDReassemble_Form = dotNetObject "System.Windows.Forms.Form"
+
+	local frm = CloneUI.skinForm PowerUSDReassemble_Form "PowerUSD Reassemble" 380 560
+	local shell = CloneUI.addShell frm "PowerUSD Reassemble" version:"v1.0"
+	local pad = shell[1]
+	local iW = shell[2]
+	local Y = shell[3]
+
+	frm.controls.add (CloneUI.mkLabel "Export Dir" (pad+4) Y 90 18 fObj:CloneUI.fSmall cObj:CloneUI.cDim)
+	Y += 22
+	local edt_dir = CloneUI.mkText pad Y (iW - 86) 22 readOnly:true
+	local btn_browse = CloneUI.mkBtn "Browse" (pad + iW - 78) (Y-1) 78 24
+	frm.controls.add edt_dir
+	frm.controls.add btn_browse
+	Y += 44
+
+	frm.controls.add (CloneUI.mkSep pad Y iW); Y += 12
+	frm.controls.add (CloneUI.mkLabel "TIME RANGE" pad Y iW 18 fObj:CloneUI.fBold cObj:CloneUI.cHead); Y += 26
+	frm.controls.add (CloneUI.mkLabel "Start" (pad+4) Y 44 18 fObj:CloneUI.fSmall cObj:CloneUI.cDim)
+	local spn_startFrame = CloneUI.mkNumeric (pad+48) (Y-2) 70 -10000 10000 (animationRange.start.frame as integer)
+	frm.controls.add spn_startFrame
+	frm.controls.add (CloneUI.mkLabel "End" (pad+134) Y 38 18 fObj:CloneUI.fSmall cObj:CloneUI.cDim)
+	local spn_endFrame = CloneUI.mkNumeric (pad+172) (Y-2) 70 -10000 10000 (animationRange.end.frame as integer)
+	frm.controls.add spn_endFrame
+	frm.controls.add (CloneUI.mkLabel "FPS" (pad+258) Y 34 18 fObj:CloneUI.fSmall cObj:CloneUI.cDim)
+	local spn_fps = CloneUI.mkNumeric (pad+292) (Y-2) 54 1 120 (frameRate as integer)
+	frm.controls.add spn_fps
+	Y += 42
+
+	frm.controls.add (CloneUI.mkSep pad Y iW); Y += 12
+	frm.controls.add (CloneUI.mkLabel "ASSEMBLY" pad Y iW 18 fObj:CloneUI.fBold cObj:CloneUI.cHead); Y += 26
+	local chk_rootPrim = CloneUI.mkCheck "Root Prim" (pad+4) Y 120 chk:false
+	local chk_inlineCameras = CloneUI.mkCheck "Inline Cameras" (pad+170) Y 160 chk:true
+	frm.controls.add chk_rootPrim
+	frm.controls.add chk_inlineCameras
+	Y += 30
+	frm.controls.add (CloneUI.mkLabel "Default Prim" (pad+4) Y 90 18 fObj:CloneUI.fSmall cObj:CloneUI.cDim)
+	local edt_defaultPrim = CloneUI.mkText (pad+104) (Y-2) 160 22 text:"World"
+	edt_defaultPrim.Enabled = false
+	frm.controls.add edt_defaultPrim
+	Y += 42
+
+	local lbl_status = CloneUI.mkLabel "" pad Y iW 34 fObj:CloneUI.fSmall cObj:CloneUI.cDim
+	frm.controls.add lbl_status
+	Y += 40
+	local btn_dryHierarchy = CloneUI.mkBtn "GENERATE _HIERARCHY" pad Y iW 28
+	btn_dryHierarchy.Enabled = false
+	local btn_assemble = CloneUI.mkBtn "REASSEMBLE STAGE" pad (Y + 36) iW 36
+	btn_assemble.Enabled = false
+	frm.controls.add btn_dryHierarchy
+	frm.controls.add btn_assemble
+	Y += 92
+
+	local credit = CloneUI.mkLabel "clone" 0 Y 380 16 fObj:CloneUI.fSmall cObj:(CloneUI.clr.FromArgb 55 55 55)
+	credit.TextAlign = CloneUI.alC.MiddleCenter
+	frm.controls.add credit
+	frm.Size = dotNetObject CloneUI.szC 380 (Y + 24)
+
+	fn onRootPrimChanged s e = (edt_defaultPrim.Enabled = chk_rootPrim.Checked)
+
+	fn onBrowseReassemble s e =
 	(
-		bitmap bmp_logo "Logo" fileName:"" height:50 width:240 align:#center
-
-		edittext edt_dir "Export Dir:" fieldWidth:220 readOnly:true
-		button btn_browse "Browse..." width:220 height:24
-
-		group "Time Range"
+		local dir = getSavePath caption:"Select Export Directory"
+		if dir != undefined do
 		(
-			spinner spn_startFrame "Start:" range:[-10000, 10000, 0] type:#integer fieldWidth:50 across:2
-			spinner spn_endFrame "End:" range:[-10000, 10000, 100] type:#integer fieldWidth:50
-			spinner spn_fps "FPS:" range:[1, 120, 24] type:#integer fieldWidth:50
-		)
-
-		group "Assembly"
-		(
-			checkbox chk_rootPrim "Root Prim" checked:false tooltip:"Wrap everything under a root prim.\nUncheck to place assets at stage root."
-			edittext edt_defaultPrim "Default Prim:" text:"World" fieldWidth:180 enabled:false tooltip:"Top-level assembly prim name."
-			checkbox chk_inlineCameras "Inline Cameras" checked:true tooltip:"Write camera data directly into .usda stage.\nUncheck to use USD references for cameras."
-		)
-
-		label lbl_status "" align:#left
-		button btn_dryHierarchy "GENERATE _HIERARCHY" width:220 height:24 enabled:false tooltip:"Generate _hierarchy.txt from current scene selection.\nRequires objects to be selected."
-		button btn_assemble "REASSEMBLE STAGE" width:220 height:40 enabled:false
-
-		on rReassemble open do
-		(
-			spn_startFrame.value = animationRange.start.frame as integer
-			spn_endFrame.value = animationRange.end.frame as integer
-			spn_fps.value = frameRate as integer
-
-			local iconsDir = GetDir #userIcons
-			local logoPath = iconsDir + "\\PowerUSD\\powerusd_logo.png"
-			if doesFileExist logoPath do bmp_logo.fileName = logoPath
-		)
-
-		on chk_rootPrim changed state do
-			edt_defaultPrim.enabled = state
-
-		on btn_browse pressed do
-		(
-			local dir = getSavePath caption:"Select Export Directory"
-			if dir != undefined do
+			edt_dir.Text = dir
+			local usdFiles = getFiles (dir + "\\*.usd") + getFiles (dir + "\\*.usda") + getFiles (dir + "\\*.usdc")
+			local hasHierarchy = doesFileExist (dir + "\\_hierarchy.txt")
+			if usdFiles.count == 0 then
 			(
-				edt_dir.text = dir
-
-				-- Check for USD files
-				local usdFiles = getFiles (dir + "\\*.usd") + getFiles (dir + "\\*.usda") + getFiles (dir + "\\*.usdc")
-				local hasHierarchy = doesFileExist (dir + "\\_hierarchy.txt")
-
-				if usdFiles.count == 0 then
-				(
-					lbl_status.text = "No USD files found."
-					btn_dryHierarchy.enabled = true
-					btn_assemble.enabled = false
-				)
-				else
-				(
-					local msg = (usdFiles.count as string) + " USD file(s)"
-					if hasHierarchy then msg += " + hierarchy"
-					else msg += " (flat mode)"
-					lbl_status.text = msg
-					btn_dryHierarchy.enabled = true
-					btn_assemble.enabled = true
-				)
-			)
-		)
-
-		on btn_dryHierarchy pressed do
-		(
-			if edt_dir.text == "" do (messageBox "Select a directory first."; return false)
-
-			local rawSelection = selection as array
-			if rawSelection.count == 0 do (messageBox "Select objects in the scene first."; return false)
-
-			local scriptsDir = PowerUSD_getScriptsDir()
-			local builderPath = scriptsDir + "Clone_USD_HierarchyBuilder.ms"
-			if not doesFileExist builderPath do
-			(
-				messageBox ("Clone_USD_HierarchyBuilder.ms not found.\n\nLooked in:\n" + builderPath)
-				return false
-			)
-
-			fileIn builderPath
-
-			local exportSets = ::buildAdvancedExportSets rawSelection edt_dir.text writeMetadata:false
-			exportSets = ::bundleCameraTargetsInExportSets exportSets
-			::writeHierarchyMetadata exportSets edt_dir.text
-			::printHierarchyPreview exportSets
-
-			lbl_status.text = "_hierarchy.txt written (" + exportSets.count as string + " entries)"
-			messageBox ("_hierarchy.txt written with " + exportSets.count as string + " entries.") title:"PowerUSD"
-		)
-
-		on btn_assemble pressed do
-		(
-			if edt_dir.text == "" do (messageBox "Select a directory first."; return false)
-
-			local scriptsDir = PowerUSD_getScriptsDir()
-			local assemblerPath = scriptsDir + "Clone_USD_StageAssembler.py"
-
-			if not doesFileExist assemblerPath do
-			(
-				messageBox ("Clone_USD_StageAssembler.py not found.\n\nLooked in:\n" + assemblerPath)
-				return false
-			)
-
-			local safeDir = substituteString edt_dir.text "'" "\\'"
-			python.Execute ("_powerusd_export_dir = r'" + safeDir + "'")
-
-			if chk_rootPrim.checked then
-			(
-				local primName = trimRight (trimLeft edt_defaultPrim.text)
-				if primName != "" then
-				(
-					local safePrim = substituteString primName "'" "\\'"
-					python.Execute ("_powerusd_default_prim = r'" + safePrim + "'")
-				)
-				else
-				(
-					python.Execute "_powerusd_default_prim = None"
-				)
+				lbl_status.Text = "No USD files found."
+				btn_dryHierarchy.Enabled = true
+				btn_assemble.Enabled = false
 			)
 			else
 			(
-				python.Execute "_powerusd_default_prim = None"
+				local msg = (usdFiles.count as string) + " USD file(s)"
+				if hasHierarchy then msg += " + hierarchy" else msg += " (flat mode)"
+				lbl_status.Text = msg
+				btn_dryHierarchy.Enabled = true
+				btn_assemble.Enabled = true
 			)
-
-			python.Execute ("_powerusd_start_frame = " + (spn_startFrame.value as integer) as string)
-			python.Execute ("_powerusd_end_frame = " + (spn_endFrame.value as integer) as string)
-			python.Execute ("_powerusd_fps = " + (spn_fps.value as integer) as string)
-
-			if chk_inlineCameras.checked then
-				python.Execute "_powerusd_inline_cameras = True"
-			else
-				python.Execute "_powerusd_inline_cameras = False"
-
-			python.ExecuteFile assemblerPath
-
-			lbl_status.text = "Reassembly complete."
-			messageBox "Stage reassembled." title:"PowerUSD"
 		)
 	)
 
-	createDialog rReassemble
+	fn onDryHierarchy s e =
+	(
+		if edt_dir.Text == "" do (messageBox "Select a directory first."; return false)
+		local rawSelection = selection as array
+		if rawSelection.count == 0 do (messageBox "Select objects in the scene first."; return false)
+		local scriptsDir = PowerUSD_getScriptsDir()
+		local builderPath = scriptsDir + "Clone_USD_HierarchyBuilder.ms"
+		if not doesFileExist builderPath do
+		(
+			messageBox ("Clone_USD_HierarchyBuilder.ms not found.\n\nLooked in:\n" + builderPath)
+			return false
+		)
+		fileIn builderPath
+		local exportSets = ::buildAdvancedExportSets rawSelection edt_dir.Text writeMetadata:false
+		exportSets = ::bundleCameraTargetsInExportSets exportSets
+		::writeHierarchyMetadata exportSets edt_dir.Text
+		::printHierarchyPreview exportSets
+		lbl_status.Text = "_hierarchy.txt written (" + exportSets.count as string + " entries)"
+		messageBox ("_hierarchy.txt written with " + exportSets.count as string + " entries.") title:"PowerUSD"
+	)
+
+	fn onAssemble s e =
+	(
+		if edt_dir.Text == "" do (messageBox "Select a directory first."; return false)
+		local scriptsDir = PowerUSD_getScriptsDir()
+		local assemblerPath = scriptsDir + "Clone_USD_StageAssembler.py"
+		if not doesFileExist assemblerPath do
+		(
+			messageBox ("Clone_USD_StageAssembler.py not found.\n\nLooked in:\n" + assemblerPath)
+			return false
+		)
+		local safeDir = substituteString edt_dir.Text "'" "\\'"
+		python.Execute ("_powerusd_export_dir = r'" + safeDir + "'")
+		if chk_rootPrim.Checked then
+		(
+			local primName = trimRight (trimLeft edt_defaultPrim.Text)
+			if primName != "" then
+			(
+				local safePrim = substituteString primName "'" "\\'"
+				python.Execute ("_powerusd_default_prim = r'" + safePrim + "'")
+			)
+			else python.Execute "_powerusd_default_prim = None"
+		)
+		else python.Execute "_powerusd_default_prim = None"
+		python.Execute ("_powerusd_start_frame = " + (spn_startFrame.Value as integer) as string)
+		python.Execute ("_powerusd_end_frame = " + (spn_endFrame.Value as integer) as string)
+		python.Execute ("_powerusd_fps = " + (spn_fps.Value as integer) as string)
+		if chk_inlineCameras.Checked then python.Execute "_powerusd_inline_cameras = True" else python.Execute "_powerusd_inline_cameras = False"
+		python.ExecuteFile assemblerPath
+		lbl_status.Text = "Reassembly complete."
+		messageBox "Stage reassembled." title:"PowerUSD"
+	)
+
+	dotNet.addEventHandler chk_rootPrim "CheckedChanged" onRootPrimChanged
+	dotNet.addEventHandler btn_browse "Click" onBrowseReassemble
+	dotNet.addEventHandler btn_dryHierarchy "Click" onDryHierarchy
+	dotNet.addEventHandler btn_assemble "Click" onAssemble
+	append CloneUI_handlers #(onRootPrimChanged, onBrowseReassemble, onDryHierarchy, onAssemble)
+	frm.Show()
 )
 
 (

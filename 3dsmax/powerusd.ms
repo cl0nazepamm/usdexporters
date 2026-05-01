@@ -204,9 +204,16 @@ fn PowerUSD_InstallStartupLoader =
 		"Clone_USD_usdWrapper.py",
 		"Clone_USD_PropertiesChaser.py",
 		"Clone_USD_StageAssembler.py",
-		"Clone_USD_AttributeDef.ms"
+		"Clone_USD_AttributeDef.ms",
+		"CloneUI.ms"
 	)
 	CloneTools_installFiles selfFile extraFiles:deps
+	local sourceDir = CloneTools_detectSourceDir selfFile
+	if sourceDir != undefined and sourceDir != "" do
+	(
+		local logoSrc = sourceDir + "icons\\powerusd_logo.png"
+		if doesFileExist logoSrc do CloneTools_copyFile logoSrc ((getDir #userScripts) + "\\CloneTools\\powerusd_logo.png")
+	)
 	CloneTools_installUserMacroMirror selfFile "PowerUSDExport_CloneTools.mcr"
 
 	local macroPaths = CloneTools_collectMacroPaths selfFile
@@ -280,243 +287,271 @@ buttonText:"Clone PowerUSD UI"
 			python.Execute "_powerusd_inline_cameras = False"
 	)
 
-	rollout rPowerUSD "Power USD Exporter" width:260
+	try(if CloneUI == undefined do fileIn ((getDir #userScripts) + "\\CloneTools\\CloneUI.ms"))catch(fileIn (PowerUSD_getScriptsDir() + "CloneUI.ms"))
+	try(PowerUSDExport_Form.Close())catch()
+	try(PowerUSDExport_Form.Dispose())catch()
+	global PowerUSDExport_Form = dotNetObject "System.Windows.Forms.Form"
+
+	local frm = CloneUI.skinForm PowerUSDExport_Form "Power USD Exporter" 380 820
+	local shell = CloneUI.addShell frm "Power USD Exporter" version:"v1.0"
+	local pad = shell[1]
+	local iW = shell[2]
+	local Y = shell[3]
+
+	frm.controls.add (CloneUI.mkLabel "EXPORT MODE" pad Y iW 18 fObj:CloneUI.fBold cObj:CloneUI.cHead); Y += 26
+	local chk_advSingle = CloneUI.mkCheck "Single Export" (pad+4) Y 180 chk:false
+	frm.controls.add chk_advSingle
+	Y += 38
+
+	frm.controls.add (CloneUI.mkSep pad Y iW); Y += 12
+	frm.controls.add (CloneUI.mkLabel "OPTIONS" pad Y iW 18 fObj:CloneUI.fBold cObj:CloneUI.cHead); Y += 26
+	local chk_thumbnail = CloneUI.mkCheck "Generate Thumbnails" (pad+4) Y 170 chk:false
+	frm.controls.add chk_thumbnail
+	Y += 28
+	local chk_hierFolders = CloneUI.mkCheck "Folders by Hierarchy" (pad+4) Y 180 chk:false
+	local chk_layerFolders = CloneUI.mkCheck "Folders by Layer" (pad+194) Y 150 chk:false
+	frm.controls.add chk_hierFolders
+	frm.controls.add chk_layerFolders
+	Y += 38
+
+	frm.controls.add (CloneUI.mkSep pad Y iW); Y += 12
+	frm.controls.add (CloneUI.mkLabel "MATERIALX" pad Y iW 18 fObj:CloneUI.fBold cObj:CloneUI.cHead); Y += 26
+	local chk_force_mtlx = CloneUI.mkCheck "Force MaterialX Sidecar" (pad+4) Y 230 chk:false
+	frm.controls.add chk_force_mtlx
+	Y += 28
+	local chk_inline_mtlx = CloneUI.mkCheck "Inline MaterialX Into USD" (pad+4) Y 240 chk:false
+	frm.controls.add chk_inline_mtlx
+	Y += 28
+	local chk_ref_textures = CloneUI.mkCheck "Reference Textures (no copy)" (pad+4) Y 250 chk:true
+	frm.controls.add chk_ref_textures
+	Y += 42
+
+	frm.controls.add (CloneUI.mkSep pad Y iW); Y += 12
+	frm.controls.add (CloneUI.mkLabel "ASSEMBLER" pad Y iW 18 fObj:CloneUI.fBold cObj:CloneUI.cHead); Y += 26
+	local chk_autoAssemble = CloneUI.mkCheck "Auto Assemble Stage" (pad+4) Y 180 chk:true
+	local chk_rootPrim = CloneUI.mkCheck "Root Prim" (pad+204) Y 130 chk:false
+	frm.controls.add chk_autoAssemble
+	frm.controls.add chk_rootPrim
+	Y += 30
+	frm.controls.add (CloneUI.mkLabel "Default Prim" (pad+4) Y 90 18 fObj:CloneUI.fSmall cObj:CloneUI.cDim)
+	local edt_defaultPrim = CloneUI.mkText (pad+102) (Y-2) 150 22 text:"World"
+	edt_defaultPrim.Enabled = false
+	frm.controls.add edt_defaultPrim
+	Y += 30
+	local chk_inlineCameras = CloneUI.mkCheck "Inline Cameras" (pad+4) Y 170 chk:false
+	frm.controls.add chk_inlineCameras
+	Y += 42
+
+	local btn_export = CloneUI.mkBtn "EXPORT SELECTED" pad Y iW 38
+	local btn_export_sets = CloneUI.mkBtn "EXPORT SELECTION SETS" pad (Y + 46) iW 30
+	local btn_genProxy = CloneUI.mkBtn "GENERATE CUBE PROXIES" pad (Y + 84) iW 28
+	frm.controls.add btn_export
+	frm.controls.add btn_export_sets
+	frm.controls.add btn_genProxy
+	Y += 124
+
+	local credit = CloneUI.mkLabel "clone" 0 Y 380 16 fObj:CloneUI.fSmall cObj:(CloneUI.clr.FromArgb 55 55 55)
+	credit.TextAlign = CloneUI.alC.MiddleCenter
+	frm.controls.add credit
+	frm.Size = dotNetObject CloneUI.szC 380 (Y + 24)
+
+	fn onAdvancedSingleChanged s e =
 	(
-		bitmap bmp_logo "Logo" fileName:"" height:50 width:240 align:#center
+		local state = chk_advSingle.Checked
+		chk_autoAssemble.Enabled = not state
+		chk_rootPrim.Enabled = not state
+		edt_defaultPrim.Enabled = (not state) and chk_rootPrim.Checked
+		chk_inlineCameras.Enabled = not state
+	)
 
-		group "Export Mode"
+	fn onRootPrimChanged s e = (edt_defaultPrim.Enabled = chk_rootPrim.Checked and chk_rootPrim.Enabled)
+	fn onHierarchyFoldersChanged s e = (if chk_hierFolders.Checked do chk_layerFolders.Checked = false)
+	fn onLayerFoldersChanged s e = (if chk_layerFolders.Checked do chk_hierFolders.Checked = false)
+
+	fn onGenerateProxy s e =
+	(
+		if selection.count == 0 then (messageBox "No objects selected."; return false)
+
+		local attrDefPath = PowerUSD_getScriptsDir() + "Clone_USD_AttributeDef.ms"
+		if doesFileExist attrDefPath do fileIn attrDefPath
+
+		local created = 0
+		local renderObjs = for obj in selection where (matchPattern obj.name pattern:"*_RENDER*") collect obj
+
+		if renderObjs.count == 0 then
 		(
-			checkbox chk_advSingle "Single Export" checked:false \
-				tooltip:"Exports only selected Advanced units for incremental updates.\nHierarchy metadata is not rewritten."
+			messageBox "No _RENDER objects found in selection."
+			return false
 		)
 
-		group "Options"
+		undo "Generate Cube Proxies" on
 		(
-			checkbox chk_thumbnail "Generate Thumbnails" checked:false
-			checkbox chk_hierFolders "Folders by Hierarchy" checked:false tooltip:"Mirror scene hierarchy (helper names) into subfolders."
-			checkbox chk_layerFolders "Folders by Layer" checked:false tooltip:"Mirror layer hierarchy into subfolders."
-		)
-
-		group "MaterialX"
-		(
-			checkbox chk_force_mtlx "Force MaterialX Sidecar" checked:false tooltip:"Run the MaterialX postpass on every exported USD. Files without MaterialX content fall back to UsdPreviewSurface with no sidecar written."
-			checkbox chk_inline_mtlx "Inline MaterialX Into USD" checked:false tooltip:"Final postpass: generate MaterialX, compose it into the exported USD, then remove the temporary .mtlx sidecar."
-			checkbox chk_ref_textures "Reference Textures (no copy)" checked:true tooltip:"Emit relative texture paths in MaterialX without copying bitmaps to the export folder.\nUncheck when exporting to a standalone folder that should ship with its own texture set."
-		)
-
-		group "Assembler"
-		(
-			checkbox chk_autoAssemble "Auto Assemble Stage" checked:true tooltip:"Create .usda stage referencing all exports.\nRebuilds hierarchy from metadata."
-			checkbox chk_rootPrim "Root Prim" checked:false tooltip:"Wrap everything under a root prim.\nUncheck to place assets at stage root."
-			edittext edt_defaultPrim "Default Prim:" text:"World" fieldWidth:140 tooltip:"Top-level assembly prim name (e.g. World)."
-			checkbox chk_inlineCameras "Inline Cameras" checked:false tooltip:"Write camera data directly into .usda stage.\nUncheck to use USD references for cameras."
-		)
-
-		button btn_export "EXPORT SELECTED" width:220 height:40 highlightColor:(color 0 200 0)
-		button btn_export_sets "EXPORT SELECTION SETS" width:220 height:30
-		button btn_genProxy "Generate Cube Proxies" width:220 height:24 tooltip:"Create bounding box proxies for selected _RENDER objects."
-
-		on chk_advSingle changed state do
-		(
-			chk_autoAssemble.enabled = not state
-			chk_rootPrim.enabled = not state
-			edt_defaultPrim.enabled = (not state) and chk_rootPrim.checked
-			chk_inlineCameras.enabled = not state
-		)
-
-		on chk_rootPrim changed state do
-			edt_defaultPrim.enabled = state
-
-		on chk_hierFolders changed state do
-			if state do chk_layerFolders.checked = false
-
-		on chk_layerFolders changed state do
-			if state do chk_hierFolders.checked = false
-
-		on rPowerUSD open do
-		(
-			local iconsDir = GetDir #userIcons
-			local logoPath = iconsDir + "\\PowerUSD\\powerusd_logo.png"
-			if doesFileExist logoPath do bmp_logo.fileName = logoPath
-		)
-
-		on btn_genProxy pressed do
-		(
-			if selection.count == 0 then (messageBox "No objects selected."; return false)
-
-			local attrDefPath = PowerUSD_getScriptsDir() + "Clone_USD_AttributeDef.ms"
-			if doesFileExist attrDefPath do fileIn attrDefPath
-
-			local created = 0
-			local renderObjs = for obj in selection where (matchPattern obj.name pattern:"*_RENDER*") collect obj
-
-			if renderObjs.count == 0 then
+			for obj in renderObjs do
 			(
-				messageBox "No _RENDER objects found in selection."
-				return false
+				local proxyName = substituteString obj.name "_RENDER" "_PROXY"
+				if proxyName == obj.name do
+					proxyName = substituteString obj.name "_render" "_PROXY"
+
+				if getNodeByName proxyName != undefined do continue
+
+				local bMin = obj.min
+				local bMax = obj.max
+				local bSize = bMax - bMin
+				local bCenter = (bMin + bMax) / 2.0
+
+				local proxyBox = Box length:bSize.y width:bSize.x height:bSize.z pos:[bCenter.x, bCenter.y, bMin.z]
+				proxyBox.name = proxyName
+				proxyBox.wirecolor = color 0 180 255
+
+				if obj.parent != undefined do proxyBox.parent = obj.parent
+
+				::addUSDProperties proxyBox
+
+				created += 1
 			)
+		)
 
-			undo "Generate Cube Proxies" on
+		format "Generated % cube proxy(s) with USD Properties\n" created
+	)
+
+	fn onExportSets s e =
+	(
+		if not PowerUSD_tryLoadMS "Clone_USD_HierarchyBuilder.ms" do return false
+		if selectionSets.count == 0 then (messageBox "No Selection Sets found."; return false)
+
+		if g_PowerUSD_lastDir == undefined do g_PowerUSD_lastDir = (getDir #export)
+		local outDir = getSavePath caption:"Select Output Directory" initialDir:g_PowerUSD_lastDir
+		if outDir == undefined do return false
+		g_PowerUSD_lastDir = outDir
+
+		PowerUSD_tryRunPy "Clone_USD_CleanStruct.py"
+		PowerUSD_tryRunPy "Clone_USD_usdWrapper.py"
+		PowerUSD_tryRunPy "Clone_USD_PropertiesChaser.py"
+
+		local exportSets = #()
+		for i = 1 to selectionSets.count do
+		(
+			local setName = getNamedSelSetName i
+			local setNodes = for obj in selectionSets[i] collect obj
+			if setNodes.count > 0 do
+				append exportSets (::ExportNodeData exportName:setName rootNodes:setNodes moveRoot:undefined subFolder:undefined parentName:undefined)
+		)
+		exportSets = ::partitionCamerasToSingleExport exportSets cameraFileName:"Cameras"
+		exportSets = ::bundleCameraTargetsInExportSets exportSets
+
+		if not chk_hierFolders.Checked and not chk_layerFolders.Checked do
+			for es in exportSets do es.subFolder = undefined
+
+		local currentSel = selection as array
+		local startF = animationRange.start.frame as integer
+		local endF = animationRange.end.frame as integer
+		local fps = frameRate as integer
+		local exportSuccess = ::performBatchExport exportSets outDir false chk_thumbnail.Checked startF endF fps useLegacyExport:true forceMaterialXSidecar:(chk_force_mtlx.Checked or chk_inline_mtlx.Checked) inlineMaterialXIntoUsd:chk_inline_mtlx.Checked referenceTextures:chk_ref_textures.Checked
+
+		if exportSuccess do
+		(
+			select currentSel
+			::writeCameraSequence outDir
+			if chk_autoAssemble.Checked do
 			(
-				for obj in renderObjs do
+				local assemblerPath = PowerUSD_resolveToolPath "Clone_USD_StageAssembler.py"
+				if assemblerPath != undefined do
 				(
-					local proxyName = substituteString obj.name "_RENDER" "_PROXY"
-					if proxyName == obj.name do
-						proxyName = substituteString obj.name "_render" "_PROXY"
-
-					if getNodeByName proxyName != undefined do continue
-
-					local bMin = obj.min
-					local bMax = obj.max
-					local bSize = bMax - bMin
-					local bCenter = (bMin + bMax) / 2.0
-
-					local proxyBox = Box length:bSize.y width:bSize.x height:bSize.z pos:[bCenter.x, bCenter.y, bMin.z]
-					proxyBox.name = proxyName
-					proxyBox.wirecolor = color 0 180 255
-
-					if obj.parent != undefined do proxyBox.parent = obj.parent
-
-					::addUSDProperties proxyBox
-
-					created += 1
+					setAssemblerPythonVars outDir (if chk_rootPrim.Checked then edt_defaultPrim.Text else "") startF endF fps inlineCameras:chk_inlineCameras.Checked
+					python.ExecuteFile assemblerPath
 				)
-			)
-
-			format "Generated % cube proxy(s) with USD Properties\n" created
-		)
-
-		on btn_export_sets pressed do
-		(
-			if not PowerUSD_tryLoadMS "Clone_USD_HierarchyBuilder.ms" do return false
-			if selectionSets.count == 0 then (messageBox "No Selection Sets found."; return false)
-
-			if g_PowerUSD_lastDir == undefined do g_PowerUSD_lastDir = (getDir #export)
-			local outDir = getSavePath caption:"Select Output Directory" initialDir:g_PowerUSD_lastDir
-			if outDir == undefined do return false
-			g_PowerUSD_lastDir = outDir
-
-			PowerUSD_tryRunPy "Clone_USD_CleanStruct.py"
-			PowerUSD_tryRunPy "Clone_USD_usdWrapper.py"
-			PowerUSD_tryRunPy "Clone_USD_PropertiesChaser.py"
-
-			local exportSets = #()
-			for i = 1 to selectionSets.count do
-			(
-				local setName = getNamedSelSetName i
-				local setNodes = for obj in selectionSets[i] collect obj
-				if setNodes.count > 0 do
-					append exportSets (::ExportNodeData exportName:setName rootNodes:setNodes moveRoot:undefined subFolder:undefined parentName:undefined)
-			)
-			exportSets = ::partitionCamerasToSingleExport exportSets cameraFileName:"Cameras"
-			exportSets = ::bundleCameraTargetsInExportSets exportSets
-
-			if not chk_hierFolders.checked and not chk_layerFolders.checked do
-				for es in exportSets do es.subFolder = undefined
-
-			local currentSel = selection as array
-			local startF = animationRange.start.frame as integer
-			local endF = animationRange.end.frame as integer
-			local fps = frameRate as integer
-			local exportSuccess = ::performBatchExport exportSets outDir false chk_thumbnail.checked startF endF fps useLegacyExport:true forceMaterialXSidecar:(chk_force_mtlx.checked or chk_inline_mtlx.checked) inlineMaterialXIntoUsd:chk_inline_mtlx.checked referenceTextures:chk_ref_textures.checked
-
-			if exportSuccess do
-			(
-				select currentSel
-				::writeCameraSequence outDir
-				if chk_autoAssemble.checked do
-				(
-					local assemblerPath = PowerUSD_resolveToolPath "Clone_USD_StageAssembler.py"
-					if assemblerPath != undefined do
-					(
-						setAssemblerPythonVars outDir (if chk_rootPrim.checked then edt_defaultPrim.text else "") startF endF fps inlineCameras:chk_inlineCameras.checked
-						python.ExecuteFile assemblerPath
-					)
-				)
-			)
-		)
-
-		on btn_export pressed do
-		(
-			if not PowerUSD_tryLoadMS "Clone_USD_HierarchyBuilder.ms" do return false
-			local rawSelection = selection as array
-			if rawSelection.count == 0 then (messageBox "No objects selected."; return false)
-
-			-- Convert Max groups (if any) to plain Dummies BEFORE building export sets.
-			-- Only runs when actual groups exist. Skips scenes with only helpers.
-			local hasGroups = false
-			for n in rawSelection while not hasGroups do
-			(
-				local c = n
-				while c != undefined do (if isGroupHead c do (hasGroups = true; exit); c = c.parent)
-			)
-			if hasGroups do
-			(
-				-- Group conversion may need USDPropertiesCA to preserve USD Properties modifiers.
-				if not PowerUSD_tryLoadMS "Clone_USD_AttributeDef.ms" do return false
-				::convertGroupsToDummies rawSelection
-			)
-
-			if g_PowerUSD_lastDir == undefined do g_PowerUSD_lastDir = (getDir #export)
-			local outDir = getSavePath caption:"Select Output Directory" initialDir:g_PowerUSD_lastDir
-			if outDir == undefined do return false
-			g_PowerUSD_lastDir = outDir
-
-			PowerUSD_tryRunPy "Clone_USD_CleanStruct.py"
-			PowerUSD_tryRunPy "Clone_USD_usdWrapper.py"
-			PowerUSD_tryRunPy "Clone_USD_PropertiesChaser.py"
-
-			local exportSets = #()
-			local shouldWriteHierarchyMeta = false
-
-			local useLayers = chk_layerFolders.checked
-
-			-- Re-capture selection after group conversion (old group head refs are dead)
-			if hasGroups do rawSelection = selection as array
-
-			if chk_advSingle.checked then
-			(
-				exportSets = ::buildAdvancedSingleExportSets rawSelection outDir writeMetadata:false useLayers:useLayers
-			)
-			else
-			(
-				exportSets = ::buildAdvancedExportSets rawSelection outDir writeMetadata:false useLayers:useLayers
-				shouldWriteHierarchyMeta = true
-			)
-
-			exportSets = ::partitionCamerasToSingleExport exportSets cameraFileName:"Cameras"
-			exportSets = ::bundleCameraTargetsInExportSets exportSets
-
-			if not chk_hierFolders.checked and not chk_layerFolders.checked do
-				for es in exportSets do es.subFolder = undefined
-
-			if shouldWriteHierarchyMeta and exportSets.count > 0 do ::writeHierarchyMetadata exportSets outDir
-
-			local currentSel = selection as array
-			local startF = animationRange.start.frame as integer
-			local endF = animationRange.end.frame as integer
-			local fps = frameRate as integer
-			local exportSuccess = ::performBatchExport exportSets outDir false chk_thumbnail.checked startF endF fps useLegacyExport:true forceMaterialXSidecar:(chk_force_mtlx.checked or chk_inline_mtlx.checked) inlineMaterialXIntoUsd:chk_inline_mtlx.checked referenceTextures:chk_ref_textures.checked
-
-			if exportSuccess do
-			(
-				try ( select (for n in rawSelection where isValidNode n collect n) ) catch ()
-				::writeCameraSequence outDir
-				if chk_autoAssemble.checked and not chk_advSingle.checked do
-				(
-					local assemblerPath = PowerUSD_resolveToolPath "Clone_USD_StageAssembler.py"
-					if assemblerPath != undefined do
-					(
-						setAssemblerPythonVars outDir (if chk_rootPrim.checked then edt_defaultPrim.text else "") startF endF fps inlineCameras:chk_inlineCameras.checked
-						python.ExecuteFile assemblerPath
-					)
-				)
-				format "\n=== Export Complete ===\n"
 			)
 		)
 	)
 
-	createDialog rPowerUSD
+	fn onExportSelected s e =
+	(
+		if not PowerUSD_tryLoadMS "Clone_USD_HierarchyBuilder.ms" do return false
+		local rawSelection = selection as array
+		if rawSelection.count == 0 then (messageBox "No objects selected."; return false)
+
+		-- Convert Max groups (if any) to plain Dummies BEFORE building export sets.
+		-- Only runs when actual groups exist. Skips scenes with only helpers.
+		local hasGroups = false
+		for n in rawSelection while not hasGroups do
+		(
+			local c = n
+			while c != undefined do (if isGroupHead c do (hasGroups = true; exit); c = c.parent)
+		)
+		if hasGroups do
+		(
+			-- Group conversion may need USDPropertiesCA to preserve USD Properties modifiers.
+			if not PowerUSD_tryLoadMS "Clone_USD_AttributeDef.ms" do return false
+			::convertGroupsToDummies rawSelection
+		)
+
+		if g_PowerUSD_lastDir == undefined do g_PowerUSD_lastDir = (getDir #export)
+		local outDir = getSavePath caption:"Select Output Directory" initialDir:g_PowerUSD_lastDir
+		if outDir == undefined do return false
+		g_PowerUSD_lastDir = outDir
+
+		PowerUSD_tryRunPy "Clone_USD_CleanStruct.py"
+		PowerUSD_tryRunPy "Clone_USD_usdWrapper.py"
+		PowerUSD_tryRunPy "Clone_USD_PropertiesChaser.py"
+
+		local exportSets = #()
+		local shouldWriteHierarchyMeta = false
+
+		local useLayers = chk_layerFolders.Checked
+
+		-- Re-capture selection after group conversion (old group head refs are dead)
+		if hasGroups do rawSelection = selection as array
+
+		if chk_advSingle.Checked then
+		(
+			exportSets = ::buildAdvancedSingleExportSets rawSelection outDir writeMetadata:false useLayers:useLayers
+		)
+		else
+		(
+			exportSets = ::buildAdvancedExportSets rawSelection outDir writeMetadata:false useLayers:useLayers
+			shouldWriteHierarchyMeta = true
+		)
+
+		exportSets = ::partitionCamerasToSingleExport exportSets cameraFileName:"Cameras"
+		exportSets = ::bundleCameraTargetsInExportSets exportSets
+
+		if not chk_hierFolders.Checked and not chk_layerFolders.Checked do
+			for es in exportSets do es.subFolder = undefined
+
+		if shouldWriteHierarchyMeta and exportSets.count > 0 do ::writeHierarchyMetadata exportSets outDir
+
+		local currentSel = selection as array
+		local startF = animationRange.start.frame as integer
+		local endF = animationRange.end.frame as integer
+		local fps = frameRate as integer
+		local exportSuccess = ::performBatchExport exportSets outDir false chk_thumbnail.Checked startF endF fps useLegacyExport:true forceMaterialXSidecar:(chk_force_mtlx.Checked or chk_inline_mtlx.Checked) inlineMaterialXIntoUsd:chk_inline_mtlx.Checked referenceTextures:chk_ref_textures.Checked
+
+		if exportSuccess do
+		(
+			try ( select (for n in rawSelection where isValidNode n collect n) ) catch ()
+			::writeCameraSequence outDir
+			if chk_autoAssemble.Checked and not chk_advSingle.Checked do
+			(
+				local assemblerPath = PowerUSD_resolveToolPath "Clone_USD_StageAssembler.py"
+				if assemblerPath != undefined do
+				(
+					setAssemblerPythonVars outDir (if chk_rootPrim.Checked then edt_defaultPrim.Text else "") startF endF fps inlineCameras:chk_inlineCameras.Checked
+					python.ExecuteFile assemblerPath
+				)
+			)
+			format "\n=== Export Complete ===\n"
+		)
+	)
+
+	dotNet.addEventHandler chk_advSingle "CheckedChanged" onAdvancedSingleChanged
+	dotNet.addEventHandler chk_rootPrim "CheckedChanged" onRootPrimChanged
+	dotNet.addEventHandler chk_hierFolders "CheckedChanged" onHierarchyFoldersChanged
+	dotNet.addEventHandler chk_layerFolders "CheckedChanged" onLayerFoldersChanged
+	dotNet.addEventHandler btn_genProxy "Click" onGenerateProxy
+	dotNet.addEventHandler btn_export_sets "Click" onExportSets
+	dotNet.addEventHandler btn_export "Click" onExportSelected
+	append CloneUI_handlers #(onAdvancedSingleChanged, onRootPrimChanged, onHierarchyFoldersChanged, onLayerFoldersChanged, onGenerateProxy, onExportSets, onExportSelected)
+	frm.Show()
 )
 
 (

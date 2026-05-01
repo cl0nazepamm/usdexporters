@@ -1,6 +1,6 @@
 # PowerUSD Exporters
 
-![Clone Logo](docs/Logo.png)
+![PowerUSD Logo](docs/Logo.png)
 
 User friendly batch USD exporters for Blender and 3dsmax.
 

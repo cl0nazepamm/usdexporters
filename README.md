@@ -1,8 +1,8 @@
 # PowerUSD Exporters
 
-![PowerUSD Logo](3dsmax/icons/powerusd_logo.png)
+![PowerUSD Logo](docs/Logo.png)
 
-USD exporter tools for 3ds Max, Blender, and Unreal pipeline helpers.
+User friendly batch USD exporters for Blender and 3dsmax.
 
 ## Repository Layout
 
@@ -112,4 +112,3 @@ Unreal Editor Python scripts live in `unreal/`. Optional one-off utilities live 
 ## License
 
 MIT
-

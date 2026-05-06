@@ -4,7 +4,7 @@ id = "Clone_PowerUSD"
 version = "1.0.0"
 name = "Clone PowerUSD"
 tagline = "Bulk USD exporter."
-maintainer = "Clone and Gemini"
+maintainer = "Clone"
 type = "add-on"
 tags = ["Import-Export"]
 

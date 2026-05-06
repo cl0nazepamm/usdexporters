@@ -1,3 +1,4 @@
+import ast
 import bpy
 import os
 
@@ -41,10 +42,17 @@ def load_operator_preset(operator, preset):
                 # This assumes formatting of these files remains exactly the same
                 if line.startswith("op."):
                     line = line.removeprefix("op.")
-                    split = line.split(" = ")
-                    key = split[0]
-                    value = split[1]
-                    options[key] = eval(value)
+                    split = line.split(" = ", 1)
+                    if len(split) != 2:
+                        continue
+                    key = split[0].strip()
+                    value = split[1].strip()
+                    try:
+                        options[key] = ast.literal_eval(value)
+                    except (ValueError, SyntaxError):
+                        # Unsupported preset value (e.g. enum identifier or
+                        # bpy expression). Skip rather than executing it.
+                        print(f"Skipping unsupported preset value for '{key}': {value!r}")
             file.close()
             return options
     # If it didn't find the preset, use empty options

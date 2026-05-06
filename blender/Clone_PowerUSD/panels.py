@@ -79,7 +79,11 @@ def draw_settings(self, context):
         col.prop(settings, 'usd_format')
         col.prop(settings, 'usd_preset_enum')
         col.prop(settings, 'export_animation')
-        col.prop(settings, 'pack_textures')
+        col.prop(settings, 'flatten_instances')
+        sub = col.column()
+        sub.enabled = not settings.flatten_instances
+        sub.prop(settings, 'use_instancing')
+        col.prop(settings, 'texture_mode')
         if settings.export_animation:
             col.prop(settings, 'frame_start')
             col.prop(settings, 'frame_end')

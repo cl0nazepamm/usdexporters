@@ -90,6 +90,8 @@ class BatchExportSettings(PropertyGroup):
             (".usdc", "Binary Crate (.usdc)",
              "Binary, fast, hard to edit", 2),
             (".usda", "ASCII (.usda)", "ASCII Text, slow, easy to edit", 3),
+            (".usdz", "Packed Archive (.usdz)",
+             "Archive that can include textures", 4),
         ],
         default=".usd",
     )
@@ -110,10 +112,26 @@ class BatchExportSettings(PropertyGroup):
         description="Export the entire frame range",
         default=False,
     )
-    pack_textures: BoolProperty(
-        name="Pack Textures in USD",
-        description="Pack textures into the USD file",
+    flatten_instances: BoolProperty(
+        name="Flatten Instances",
+        description="Export duplicated/instanced objects as real objects instead of USD references. Use this for Cinema 4D if instances import at the origin.",
+        default=True,
+    )
+    use_instancing: BoolProperty(
+        name="USD Instancing (Experimental)",
+        description="Export duplicated objects as USD instances. Blender flags this as experimental — not all consumers handle USD instances correctly. Has no effect when 'Flatten Instances' is on.",
         default=False,
+    )
+    texture_mode: EnumProperty(
+        name="Textures",
+        description="How material textures are handled during export",
+        items=[
+            ('COPY', "Copy Next To USD",
+             "Copy textures into a 'textures' folder beside the USD so the file moves with its maps"),
+            ('KEEP', "Use Existing Paths",
+             "Reference textures at their current location on disk; do not copy"),
+        ],
+        default='COPY',
     )
     frame_start: IntProperty(
         name="Frame Start",

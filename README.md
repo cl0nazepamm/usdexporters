@@ -13,6 +13,7 @@ User friendly batch USD exporters for Blender and 3dsmax.
 | `unreal/` | Unreal Editor Python helpers |
 | `unreal/additional/` | Optional Unreal utility scripts |
 | `examples/3dsmax/` | Example Max scene |
+| `docs/production_risks.md` | Production risk notes and cleanup targets |
 | `docs/images/` | README screenshots |
 
 ## 3ds Max Exporter

@@ -660,6 +660,14 @@ def connect_texture_to_preview(stage, material, preview_shader, role, texture_pa
         "file", Sdf.ValueTypeNames.Asset).Set("./textures/" + Path(texture_path).name)
     texture_shader.CreateInput(
         "sourceColorSpace", Sdf.ValueTypeNames.Token).Set("sRGB" if role == "diffuse" else "raw")
+    # Game assets are authored against tiling textures; UVs frequently fall
+    # outside [0,1] (e.g. road-decal cracks tiled across a strip). USD's
+    # default ``useMetadata`` defers to the texture file, which most game
+    # textures lack — Octane interprets that as clamp and stretches the edge
+    # texel across the whole UV range. Author repeat explicitly so every
+    # renderer agrees.
+    texture_shader.CreateInput("wrapS", Sdf.ValueTypeNames.Token).Set("repeat")
+    texture_shader.CreateInput("wrapT", Sdf.ValueTypeNames.Token).Set("repeat")
 
     if role == "normal":
         # Tangent-space normals are stored in [0,1]; remap to [-1,1] so strict

@@ -7,6 +7,27 @@ from bpy.types import Operator
 from . import utils
 
 
+def filter_operator_options(operator, options):
+    category, name = operator.split(".", 1)
+    op = getattr(getattr(bpy.ops, category), name)
+    valid_options = {
+        prop.identifier
+        for prop in op.get_rna_type().properties
+        if prop.identifier != "rna_type"
+    }
+
+    filtered = {key: value for key, value in options.items() if key in valid_options}
+    removed = sorted(set(options) - valid_options)
+    if removed:
+        print(
+            "Ignoring unsupported "
+            + operator
+            + " option(s): "
+            + ", ".join(removed)
+        )
+    return filtered
+
+
 def get_hierarchy_root(obj):
     """Find the absolute root of an object's hierarchy by walking up through all parents."""
     current = obj
@@ -488,13 +509,16 @@ class EXPORT_MESH_OT_batch(Operator):
             options["selected_objects_only"] = True
             if settings.pack_textures:
                 options["relative_paths"] = False
+                options["export_textures_mode"] = 'NEW'
                 options["export_textures"] = True
+                options["overwrite_textures"] = True
             else:
                 options["export_textures"] = False
                 options["overwrite_textures"] = False
                 options["relative_paths"] = True
                 options["export_textures_mode"] = 'KEEP'
             options["export_animation"] = settings.export_animation
+            options = filter_operator_options('wm.usd_export', options)
             
             # Save current scene frame settings
             original_frame_start = context.scene.frame_start

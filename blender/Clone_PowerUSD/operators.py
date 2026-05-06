@@ -162,9 +162,15 @@ def get_material_texture_images(objects):
 
 
 _NODE_ROLE_HINTS = (
-    ("normal",   ("normal", "_nml", "_nor", "norm")),
-    ("diffuse",  ("color", "diffuse", "albedo", "basecolor", "_col", "diff")),
-    ("specular", ("specular", "_spc", "_spec", "rough", "metal", "gloss")),
+    ("normal",    ("normal", "_nml", "_nor", "norm")),
+    ("diffuse",   ("color", "diffuse", "albedo", "basecolor", "_col", "diff")),
+    # ``specular`` matched before ``roughness`` so packed-map names like
+    # ``specularRoughness`` / ``specularGloss`` (glTF / Substance / CoD
+    # variants) keep the spec role; the structural roughness detector
+    # tracks down the actual roughness channel via the group's
+    # ``Roughness`` output trace, regardless of node-name conventions.
+    ("specular",  ("specular", "_spc", "_spec", "metal")),
+    ("roughness", ("rough", "gloss")),
 )
 
 _ALPHA_LABEL_HINTS = ("alpha", "opacity", "mask", "transp", "_alp")
@@ -238,6 +244,56 @@ def detect_material_opacity(material):
     return None
 
 
+def detect_material_roughness(material):
+    """Trace where the material's roughness signal comes from inside its
+    node group. Returns ``(image, channel, invert)`` or ``None``.
+
+    * ``channel`` is ``"rgb"`` if the group's ``Roughness`` output socket is
+      driven by an image's RGB output, ``"a"`` if driven by alpha.
+    * ``invert`` is True when the path goes through a ``ShaderNodeInvert``
+      node — common in CoD-style importers that store *gloss* in the spec
+      map's alpha and feed it to ``Roughness`` through Invert."""
+    if not material.use_nodes or not material.node_tree:
+        return None
+
+    for node in material.node_tree.nodes:
+        if node.bl_idname != "ShaderNodeGroup" or not node.node_tree:
+            continue
+        out_node = next(
+            (n for n in node.node_tree.nodes if n.bl_idname == "NodeGroupOutput"),
+            None,
+        )
+        if out_node is None:
+            continue
+        for sock in out_node.inputs:
+            nm = (sock.name or "").lower()
+            if not any(k in nm for k in ("rough", "gloss")):
+                continue
+            if not sock.is_linked or not sock.links:
+                return None
+            link = sock.links[0]
+            invert = False
+            src = link.from_node
+            from_sock_name = link.from_socket.name
+            if src.bl_idname == "ShaderNodeInvert":
+                invert = True
+                upstream = next(
+                    (i for i in src.inputs if i.is_linked and i.name in ("Color", "Image")),
+                    None,
+                )
+                if upstream is None:
+                    return None
+                inner = upstream.links[0]
+                src = inner.from_node
+                from_sock_name = inner.from_socket.name
+            if src.bl_idname == "ShaderNodeTexImage" and src.image:
+                channel = "a" if from_sock_name.lower() == "alpha" else "rgb"
+                return (src.image, channel, invert)
+            return None
+        return None
+    return None
+
+
 def collect_direct_material_textures(objects):
     """Build the per-material role map from direct node-tree walks.
 
@@ -264,7 +320,43 @@ def collect_direct_material_textures(objects):
         if opacity is not None:
             opacity_image, threshold = opacity
             roles["opacity"] = opacity_image
-            options[material.name] = {"opacity_threshold": threshold}
+            options.setdefault(material.name, {})["opacity_threshold"] = threshold
+
+        roughness = detect_material_roughness(material)
+        if roughness is not None:
+            rough_image, channel, invert = roughness
+            spec_image = roles.get("specular")
+            shared_with_spec = (
+                spec_image is not None
+                and channel == "a"
+                and rough_image.name == spec_image.name
+            )
+            opts = options.setdefault(material.name, {})
+            if shared_with_spec:
+                # CoD-style: spec map's alpha encodes gloss; expose it as
+                # an extra output on the existing specular UsdUVTexture
+                # rather than authoring a duplicate texture node.
+                opts["roughness_from_specular_alpha"] = True
+                opts["roughness_invert"] = invert
+            elif channel == "a":
+                # Detector found roughness on an image's alpha channel, but
+                # we can't piggyback on a matching specular role. Authoring
+                # a standalone roughness texture would read outputs:r — the
+                # colour channel, not the alpha that actually carries the
+                # signal — so we'd wire the wrong data. Skip rather than
+                # publish a misleading roughness; the lighting team can
+                # override downstream.
+                pass
+            else:
+                # Standalone roughness or gloss image (RGB-driven). The
+                # classifier already picked it up via the ``roughness`` role
+                # hint when the node name is unambiguous; keep it in roles
+                # in case the importer named the node something the hints
+                # didn't catch. Inversion propagates as an option for
+                # gloss-source files.
+                roles.setdefault("roughness", rough_image)
+                if invert:
+                    opts["roughness_invert"] = invert
 
         if roles:
             textures[material.name] = roles
@@ -538,14 +630,25 @@ def find_preview_surface_shader(material):
 
 
 def connect_texture_to_preview(stage, material, preview_shader, role, texture_path,
-                               *, also_alpha=False, opacity_threshold=None):
+                               *, also_alpha=False, opacity_threshold=None,
+                               also_roughness_via_alpha=False, roughness_invert=False):
     """Author a UsdUVTexture for ``role`` and wire it into ``preview_shader``.
 
-    ``also_alpha`` is honoured only when ``role == 'diffuse'``: the same
-    UsdUVTexture gains an ``outputs:a`` and feeds ``UsdPreviewSurface.opacity``.
-    The CoD asset pipeline packs cutout / blend masks into the diffuse
-    RGBA, so a single texture serves both colour and opacity — no extra
-    UsdUVTexture node, no extra disk file."""
+    Side channels (one UsdUVTexture, multiple outputs) avoid duplicating
+    texture nodes when an image carries more than one signal:
+
+    * ``also_alpha`` (``role='diffuse'`` only): exposes ``outputs:a`` and
+      wires ``UsdPreviewSurface.opacity`` to it. The CoD pipeline packs
+      foliage / fence cutout masks into the diffuse RGBA.
+    * ``also_roughness_via_alpha`` (``role='specular'`` only): exposes
+      ``outputs:a`` and wires ``UsdPreviewSurface.roughness`` to it. When
+      ``roughness_invert`` is also True the alpha channel is remapped via
+      ``scale=(1,1,1,-1) bias=(0,0,0,1)`` to flip gloss → roughness.
+
+    For ``role='roughness'`` (standalone roughness/gloss image), we author
+    the texture and wire ``outputs:r`` to ``inputs:roughness``. When the
+    image actually encodes gloss, ``roughness_invert=True`` flips RGB via
+    ``scale=(-1,-1,-1,1) bias=(1,1,1,0)``."""
     from pxr import Gf, Sdf, UsdShade
 
     material_path = material.GetPath()
@@ -565,6 +668,18 @@ def connect_texture_to_preview(stage, material, preview_shader, role, texture_pa
             "scale", Sdf.ValueTypeNames.Float4).Set(Gf.Vec4f(2.0, 2.0, 2.0, 1.0))
         texture_shader.CreateInput(
             "bias", Sdf.ValueTypeNames.Float4).Set(Gf.Vec4f(-1.0, -1.0, -1.0, 0.0))
+    elif role == "specular" and also_roughness_via_alpha and roughness_invert:
+        # RGB pass-through, alpha → 1 - alpha (gloss flipped to roughness).
+        texture_shader.CreateInput(
+            "scale", Sdf.ValueTypeNames.Float4).Set(Gf.Vec4f(1.0, 1.0, 1.0, -1.0))
+        texture_shader.CreateInput(
+            "bias", Sdf.ValueTypeNames.Float4).Set(Gf.Vec4f(0.0, 0.0, 0.0, 1.0))
+    elif role == "roughness" and roughness_invert:
+        # Source is a gloss map; flip RGB so the value reads as roughness.
+        texture_shader.CreateInput(
+            "scale", Sdf.ValueTypeNames.Float4).Set(Gf.Vec4f(-1.0, -1.0, -1.0, 1.0))
+        texture_shader.CreateInput(
+            "bias", Sdf.ValueTypeNames.Float4).Set(Gf.Vec4f(1.0, 1.0, 1.0, 0.0))
 
     texture_shader.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
 
@@ -594,6 +709,16 @@ def connect_texture_to_preview(stage, material, preview_shader, role, texture_pa
         texture_shader.CreateOutput("r", Sdf.ValueTypeNames.Float)
         preview_shader.CreateInput(
             "specular", Sdf.ValueTypeNames.Float).ConnectToSource(
+                texture_shader.ConnectableAPI(), "r")
+        if also_roughness_via_alpha:
+            texture_shader.CreateOutput("a", Sdf.ValueTypeNames.Float)
+            preview_shader.CreateInput(
+                "roughness", Sdf.ValueTypeNames.Float).ConnectToSource(
+                    texture_shader.ConnectableAPI(), "a")
+    elif role == "roughness":
+        texture_shader.CreateOutput("r", Sdf.ValueTypeNames.Float)
+        preview_shader.CreateInput(
+            "roughness", Sdf.ValueTypeNames.Float).ConnectToSource(
                 texture_shader.ConnectableAPI(), "r")
     elif role == "normal":
         preview_shader.CreateInput(
@@ -651,15 +776,23 @@ def patch_usd_material_textures(usd_path, texture_map, material_options=None):
             and diffuse_path is not None
             and Path(opacity_path).name == Path(diffuse_path).name
         )
+        wire_rough_into_specular = bool(opts.get("roughness_from_specular_alpha"))
+        roughness_invert = bool(opts.get("roughness_invert"))
 
-        for role in ("diffuse", "specular", "normal"):
+        for role in ("diffuse", "specular", "roughness", "normal"):
             if role not in roles:
                 continue
+            kwargs = {}
+            if role == "diffuse":
+                kwargs["also_alpha"] = wire_alpha_into_diffuse
+                kwargs["opacity_threshold"] = opts.get("opacity_threshold")
+            elif role == "specular":
+                kwargs["also_roughness_via_alpha"] = wire_rough_into_specular
+                kwargs["roughness_invert"] = roughness_invert
+            elif role == "roughness":
+                kwargs["roughness_invert"] = roughness_invert
             connect_texture_to_preview(
-                stage, material, preview_shader, role, roles[role],
-                also_alpha=(wire_alpha_into_diffuse and role == "diffuse"),
-                opacity_threshold=(opts.get("opacity_threshold") if role == "diffuse" else None),
-            )
+                stage, material, preview_shader, role, roles[role], **kwargs)
             patched += 1
 
     if patched:

@@ -214,10 +214,15 @@ def detect_material_opacity(material):
     unwired, the outer Alpha output is connected to nothing meaningful and
     the material is solid.
 
-    ``threshold`` mirrors ``material.blend_method``: ``BLEND`` -> 0.0
-    (true alpha blend, smoother chainlink/glass edges), anything else
-    (HASHED / CLIP) -> 0.5 (cutout mask, what foliage and razor-wire
-    expect)."""
+    ``threshold`` is always 0.5 (alpha cutout) regardless of
+    ``material.blend_method``. UsdPreviewSurface ``opacity`` with
+    ``opacityThreshold = 0`` is alpha *blend*, which path tracers (Octane,
+    Karma, Cycles, etc.) cannot honour from a single scalar — they need a
+    transmission/transparent-BSDF setup that UsdPreviewSurface does not
+    express. In practice, BLEND on game assets here means a binary alpha
+    mask anyway (decals, foliage, fence, dust). Authoring cutout makes the
+    asset visible across every renderer; the lighting team can layer in
+    true transparency later for the rare glass/godray case."""
     if not material.use_nodes or not material.node_tree:
         return None
 
@@ -237,8 +242,7 @@ def detect_material_opacity(material):
                 return None
             src = sock.links[0].from_node
             if src.bl_idname == "ShaderNodeTexImage" and src.image:
-                threshold = 0.0 if material.blend_method == "BLEND" else 0.5
-                return (src.image, threshold)
+                return (src.image, 0.5)
             return None
         return None
     return None
@@ -893,6 +897,114 @@ def strip_lights_from_usd(usd_path):
             "removed_empty_groups": len(empty_top_groups)}
 
 
+def discover_assembly_parts(scene):
+    """Walk the scene and return the three sets the Assembly mode needs.
+
+    * ``prototype_collections`` - every collection that is referenced by at
+      least one collection-instance empty (``obj.instance_collection``).
+      These hold the source geometry that gets duplicated at points.
+    * ``map_objects`` - mesh objects in the scene that are neither inside
+      a prototype collection nor instance empties themselves: the static,
+      unique geometry that travels with the level rather than the assets.
+    * ``instance_empties`` - the collection-instance empties whose
+      transforms describe where each asset is placed in the world.
+
+    Visibility filtering is intentional: prototype meshes are usually
+    hidden in the viewport (they're source data, not scene content) so we
+    don't apply ``visible_get`` to them; map objects do honour visibility.
+    """
+    instance_empties = []
+    prototype_collections = []
+    seen_proto = set()
+    for obj in scene.objects:
+        if obj.instance_type == 'COLLECTION' and obj.instance_collection:
+            instance_empties.append(obj)
+            coll = obj.instance_collection
+            if coll.name not in seen_proto:
+                prototype_collections.append(coll)
+                seen_proto.add(coll.name)
+
+    proto_meshes = set()
+    for coll in prototype_collections:
+        for o in coll.all_objects:
+            if o.type == 'MESH':
+                proto_meshes.add(o)
+
+    map_objects = []
+    instance_empty_set = set(instance_empties)
+    for obj in scene.objects:
+        if obj.type != 'MESH':
+            continue
+        if obj in proto_meshes:
+            continue
+        if obj in instance_empty_set:
+            continue
+        if not obj.visible_get():
+            continue
+        map_objects.append(obj)
+
+    return prototype_collections, map_objects, instance_empties
+
+
+def build_instances_usd(usd_path, instance_empties, asset_paths, xmodel_subdir="xmodels"):
+    """Author ``instances.usdc``: one Xform per instance empty under
+    ``/Instances/<asset>/<empty>`` with a references arc pointing at
+    ``./<xmodel_subdir>/<asset>.usdc`` and the empty's world matrix as
+    the transform op. Groups by asset name so DCC users can select every
+    instance of one asset with one click."""
+    try:
+        from pxr import Usd, UsdGeom, Gf, Sdf
+    except Exception as exc:
+        print(f"Could not build instances USD: {exc}")
+        return None
+
+    if os.path.isfile(usd_path):
+        cached = Sdf.Layer.Find(usd_path)
+        if cached is not None:
+            cached.Clear()
+        os.remove(usd_path)
+
+    stage = Usd.Stage.CreateNew(usd_path)
+    stage.SetMetadata("upAxis", "Z")
+    stage.SetMetadata("metersPerUnit", 1.0)
+    root = UsdGeom.Xform.Define(stage, "/Instances")
+    stage.SetDefaultPrim(root.GetPrim())
+
+    by_asset = {}
+    for empty in instance_empties:
+        coll = empty.instance_collection
+        if coll is None or coll.name not in asset_paths:
+            continue
+        by_asset.setdefault(coll.name, []).append(empty)
+
+    written = 0
+    for asset_name in sorted(by_asset.keys()):
+        group_id = usd_sanitize_identifier(asset_name)
+        UsdGeom.Xform.Define(stage, f"/Instances/{group_id}")
+        seen = {}
+        for empty in by_asset[asset_name]:
+            safe = usd_sanitize_identifier(empty.name)
+            seen[safe] = seen.get(safe, 0) + 1
+            if seen[safe] > 1:
+                safe = f"{safe}_{seen[safe]}"
+            inst = UsdGeom.Xform.Define(stage, f"/Instances/{group_id}/{safe}")
+            inst.GetPrim().GetReferences().AddReference(f"./{xmodel_subdir}/{asset_name}.usdc")
+            inst.GetPrim().SetInstanceable(True)
+            m = empty.matrix_world
+            mtx = Gf.Matrix4d(
+                m[0][0], m[1][0], m[2][0], m[3][0],
+                m[0][1], m[1][1], m[2][1], m[3][1],
+                m[0][2], m[1][2], m[2][2], m[3][2],
+                m[0][3], m[1][3], m[2][3], m[3][3],
+            )
+            UsdGeom.Xformable(inst).AddTransformOp().Set(mtx)
+            written += 1
+
+    stage.GetRootLayer().Save()
+    print(f"Authored {written} instance reference(s) across {len(by_asset)} asset group(s) in {usd_path}")
+    return written
+
+
 def build_object_collection_map(objects, root_collection_name="Scene Collection"):
     """For each export object, return its primary parent collection name.
 
@@ -1301,14 +1413,17 @@ class EXPORT_MESH_OT_batch(Operator):
         elif settings.mode == 'SCENE':
             prefix = settings.prefix
             suffix = settings.suffix
-            
+
             filename = ''
             if not prefix and not suffix:
                 filename = bpy.path.basename(bpy.context.blend_data.filepath).split('.')[0]
-            
+
             for obj in self.get_filtered_objects(context, settings):
                 obj.select_set(True)
             self.export_selection(filename, context, base_dir)
+
+        elif settings.mode == 'ASSEMBLY':
+            self.export_assembly(context, base_dir)
 
         # Return selection to how it was
         bpy.ops.object.select_all(action='DESELECT')
@@ -1486,6 +1601,116 @@ class EXPORT_MESH_OT_batch(Operator):
         for collection in collections:
             if collection.name in bpy.data.collections:
                 bpy.data.collections.remove(collection)
+
+    def _assembly_export_one(self, context, mesh_objs, fp, root_prim_path):
+        """Drive ``wm.usd_export`` with the polished pipeline (texture
+        copy + material patch + light strip) for a single file in the
+        Assembly mode. Returns True on success."""
+        settings = context.scene.batch_export
+        extension = settings.usd_format
+
+        bpy.ops.object.select_all(action='DESELECT')
+        for o in mesh_objs:
+            o.select_set(True)
+        context.view_layer.objects.active = mesh_objs[0]
+
+        options = {
+            "filepath": fp,
+            "selected_objects_only": True,
+            "relative_paths": True,
+            "export_materials": True,
+            "generate_preview_surface": True,
+            "use_instancing": False,
+            "convert_world_material": False,
+            "export_animation": False,
+            "export_textures_mode": 'NEW' if settings.texture_mode == 'COPY' else 'KEEP',
+            "overwrite_textures": settings.texture_mode == 'COPY',
+            "root_prim_path": root_prim_path,
+            "export_lights": False,
+        }
+        options = filter_operator_options('wm.usd_export', options)
+
+        try:
+            bpy.ops.wm.usd_export(**options)
+        except Exception as exc:
+            self.report({'WARNING'}, f"USD export failed for {fp}: {exc}")
+            return False
+
+        if settings.texture_mode == 'COPY' and extension != ".usdz":
+            copied, tex_map, mat_opts = copy_material_textures(mesh_objs, fp)
+            patch_usd_material_textures(fp, tex_map, mat_opts)
+        if extension != ".usdz":
+            strip_lights_from_usd(fp)
+        return True
+
+    def export_assembly(self, context, base_dir):
+        """Split the scene into reusable parts: per-asset xmodels + map
+        + an instances scene that references them. The user composes the
+        final scene in their own master file by referencing both
+        ``map.usdc`` and ``instances.usdc``."""
+        settings = context.scene.batch_export
+        extension = settings.usd_format
+
+        prototype_colls, map_objects, instance_empties = discover_assembly_parts(context.scene)
+        if not prototype_colls and not map_objects:
+            self.report({'ERROR'}, "Assembly mode found no prototype collections or map geometry")
+            return
+
+        xmodel_dir = os.path.join(base_dir, "xmodels")
+        os.makedirs(xmodel_dir, exist_ok=True)
+
+        # 1. Per-asset USDs (prototype collections that are referenced by
+        # collection-instance empties). Prototype meshes are commonly held
+        # outside the depsgraph's visible set, so link them through a
+        # short-lived helper collection so ``selected_objects_only`` picks
+        # them up.
+        temp_coll = bpy.data.collections.new("__assembly_export_temp__")
+        context.scene.collection.children.link(temp_coll)
+
+        asset_paths = {}
+        try:
+            for coll in prototype_colls:
+                mesh_objs = [o for o in coll.all_objects if o.type == 'MESH']
+                if not mesh_objs:
+                    continue
+                for o in mesh_objs:
+                    try:
+                        temp_coll.objects.link(o)
+                    except RuntimeError:
+                        pass
+                context.view_layer.update()
+
+                fp = os.path.join(xmodel_dir, coll.name + extension)
+                if self._assembly_export_one(context, mesh_objs, fp, "/Asset"):
+                    asset_paths[coll.name] = fp
+                    self.file_count += 1
+
+                for o in mesh_objs:
+                    try:
+                        temp_coll.objects.unlink(o)
+                    except RuntimeError:
+                        pass
+                bpy.ops.object.select_all(action='DESELECT')
+        finally:
+            context.scene.collection.children.unlink(temp_coll)
+            bpy.data.collections.remove(temp_coll)
+
+        # 2. Map geometry: every visible mesh that isn't a prototype.
+        if map_objects:
+            map_fp = os.path.join(base_dir, "map" + extension)
+            if self._assembly_export_one(context, map_objects, map_fp, "/Map"):
+                self.file_count += 1
+
+        # 3. instances.usdc - references + transforms. Only meaningful
+        # when both instance empties and at least one exported asset
+        # exist; otherwise nothing references anything.
+        if instance_empties and asset_paths and extension != ".usdz":
+            inst_fp = os.path.join(base_dir, "instances" + extension)
+            build_instances_usd(inst_fp, instance_empties, asset_paths,
+                                xmodel_subdir="xmodels")
+            self.file_count += 1
+
+        bpy.ops.object.select_all(action='DESELECT')
 
     def export_selection(self, itemname, context, base_dir):
         settings = context.scene.batch_export

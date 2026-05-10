@@ -58,6 +58,12 @@ class BatchExportSettings(PropertyGroup):
             ("COLLECTION_SUBDIR_PARENTS", "Collection Sub-Directories By Parent",
              "Same as 'Collection Sub-directories', objects that are\nparents have their children exported along with them", 6),
             ("SCENE", "Scene", "Export the scene into one file\nUse prefix or suffix for filename, else .blend file name is used.", 7),
+            ("ASSEMBLY", "Assembly Parts",
+             "Split the scene into reusable USD parts:\n"
+             " * xmodels/<asset>.usdc - one file per instance-source collection\n"
+             " * map.usdc - static (non-instanced) geometry\n"
+             " * instances.usdc - point cloud of references, grouped by asset\n"
+             "Reference all three from your own master file to compose the scene.", 8),
         ],
         default="HIERARCHY_ROOTS",
     )

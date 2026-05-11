@@ -75,22 +75,29 @@ The Clean Material Structure fixes MaxUSD's default material export to produce c
 
 ### 3ds Max Installation
 
-1. Copy `3dsmax/cloneTools/` to:
-
-   ```text
-   %LOCALAPPDATA%\Autodesk\3dsMax\2026 - 64bit\ENU\scripts\CloneTools\
-   ```
-
-2. Drag the `.ms` entry scripts from `3dsmax/` into the 3ds Max viewport to install:
+1. Run or drag each entry script once:
 
    ```text
    3dsmax/powerusd.ms
+   3dsmax/register_chasers.ms
    3dsmax/bulkexporter.ms
    3dsmax/addusdproperties.ms
    3dsmax/reassemble.ms
    ```
 
-3. Optional: copy `3dsmax/icons/powerusd_logo.png` to:
+   Each script self-installs into the current 3ds Max user profile:
+
+   ```text
+   scripts/CloneTools/
+   usermacros/
+   scripts/startup/
+   ```
+
+2. Restart 3ds Max. The startup loaders re-register the CloneTools macros every launch and try the repo source first, then the installed `scripts/CloneTools/` fallback.
+
+3. Use `CloneTools > Register USD Chasers` if you need the MaxUSD chasers available before opening the PowerUSD exporter UI or before using Max's native USD exporter directly.
+
+4. Optional: copy `3dsmax/icons/powerusd_logo.png` to:
 
    ```text
    %LOCALAPPDATA%\Autodesk\3dsMax\2026 - 64bit\ENU\usericons\PowerUSD\

@@ -27,6 +27,7 @@ global writeHierarchyMetadata
 global buildAdvancedExportSets
 global findAdvancedExportUnitForObject
 global buildAdvancedSingleExportSets
+global buildAdvancedSingleSeparateExportSets
 global printHierarchyPreview
 global writeCameraSequence
 global captureViewportThumb
@@ -695,11 +696,10 @@ fn findAdvancedExportUnitForObject obj =
 )
 
 -- Build Advanced-mode compatible export sets, but only for selected units.
--- Useful for incremental re-export of single assets.
+-- Useful for incremental re-export of selected assets as one USD file.
 fn buildAdvancedSingleExportSets rawSelection outDir writeMetadata:false useLayers:false =
 (
 	local exportSets = #()
-	local processedObjects = #()
 	local organizationalNodes = #()
 
 	-- Resolve selected objects to their Advanced export units
@@ -730,7 +730,79 @@ fn buildAdvancedSingleExportSets rawSelection outDir writeMetadata:false useLaye
 		append exportSets (ExportNodeData exportName:org.name rootNodes:#() moveRoot:undefined subFolder:undefined parentName:parentName)
 	)
 
-	-- Keep the same instance grouping behavior as Advanced mode
+	-- Keep the same instance discovery as Advanced mode, but merge every
+	-- resolved unit into one export set so Single Export writes one USD file.
+	local instanceGroups = groupByInstances attributedObjects
+	local nodesToExport = #()
+	local moveRoot = undefined
+	local exportName = undefined
+	local parentName = undefined
+
+	for group in instanceGroups do
+	(
+		local master = selectMasterInstance group
+
+		if moveRoot == undefined do moveRoot = master
+		if exportName == undefined do exportName = master.name
+
+		local sceneParent = findSceneParent master
+		if parentName == undefined and sceneParent != undefined do parentName = sceneParent.name
+
+		for obj in group do
+		(
+			for node in (getDescendantsWithoutAttr obj) do appendUniqueNode nodesToExport node
+		)
+	)
+
+	if nodesToExport.count > 0 do
+	(
+		if rawSelection.count > 0 do
+		(
+			local selectedRoot = findAdvancedExportUnitForObject rawSelection[1]
+			if selectedRoot != undefined and selectedRoot.name != undefined and selectedRoot.name != "" do exportName = selectedRoot.name
+		)
+		append exportSets (ExportNodeData exportName:exportName rootNodes:nodesToExport moveRoot:moveRoot subFolder:undefined parentName:parentName)
+	)
+
+	if writeMetadata and exportSets.count > 0 do writeHierarchyMetadata exportSets outDir
+	return exportSets
+)
+
+-- Build Advanced-mode compatible export sets for selected units, but keep
+-- each resolved unit as a separate USD file. This is the old Single Export
+-- behavior kept as an explicit option.
+fn buildAdvancedSingleSeparateExportSets rawSelection outDir writeMetadata:false useLayers:false =
+(
+	local exportSets = #()
+	local processedObjects = #()
+	local organizationalNodes = #()
+
+	local attributedObjects = #()
+	for obj in rawSelection do
+	(
+		local unitRoot = findAdvancedExportUnitForObject obj
+		if unitRoot != undefined and findItem attributedObjects unitRoot == 0 do
+			append attributedObjects unitRoot
+	)
+
+	if attributedObjects.count == 0 then return exportSets
+
+	for obj in attributedObjects do
+	(
+		local ancestors = getAllAncestors obj
+		for anc in ancestors do
+		(
+			if findItem organizationalNodes anc == 0 and findItem attributedObjects anc == 0 do
+				append organizationalNodes anc
+		)
+	)
+	for org in organizationalNodes do
+	(
+		local orgParent = findSceneParent org
+		local parentName = if orgParent != undefined then orgParent.name else undefined
+		append exportSets (ExportNodeData exportName:org.name rootNodes:#() moveRoot:undefined subFolder:undefined parentName:parentName)
+	)
+
 	local instanceGroups = groupByInstances attributedObjects
 	for group in instanceGroups do
 	(

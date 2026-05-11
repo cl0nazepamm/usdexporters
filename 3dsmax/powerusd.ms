@@ -1,6 +1,7 @@
 -- Author: Clone.
 
 global g_CloneTools_ScriptsDir
+global CloneUI
 
 fn CloneTools_uniqueAppend arr value =
 (
@@ -91,7 +92,8 @@ fn CloneTools_installFiles selfFileName extraFiles:#() =
 		)
 	)
 
-	if copiedSelf do ::g_CloneTools_ScriptsDir = targetDir
+	-- Keep g_CloneTools_ScriptsDir pointing at the source file that was run.
+	-- The startup loader stores the installed copy separately as fallback.
 	copiedSelf
 )
 
@@ -195,14 +197,38 @@ fn PowerUSD_tryRunPy fileName =
 	)
 )
 
+fn PowerUSD_tryLoadEntryScript fileName =
+(
+	local sourceDir = CloneTools_detectSourceDir "powerusd.ms"
+	if sourceDir != undefined and sourceDir != "" do
+	(
+		local sourcePath = CloneTools_findSourceFile sourceDir fileName
+		if sourcePath != "" do
+		(
+			try(fileIn sourcePath quiet:true; return true)catch()
+		)
+	)
+
+	local installedPath = (getDir #userScripts) + "\\CloneTools\\" + fileName
+	if doesFileExist installedPath do
+	(
+		try(fileIn installedPath quiet:true; return true)catch()
+	)
+
+	false
+)
+
 fn PowerUSD_InstallStartupLoader =
 (
 	local selfFile = "powerusd.ms"
 	local deps = #(
+		"register_chasers.ms",
 		"Clone_USD_HierarchyBuilder.ms",
 		"Clone_USD_CleanStruct.py",
 		"Clone_USD_usdWrapper.py",
 		"Clone_USD_PropertiesChaser.py",
+		"Clone_USD_MaterialXSidecar.py",
+		"Clone_USD_ExportBridge.py",
 		"Clone_USD_StageAssembler.py",
 		"Clone_USD_AttributeDef.ms",
 		"CloneUI.ms"
@@ -301,6 +327,10 @@ buttonText:"Clone PowerUSD UI"
 	frm.controls.add (CloneUI.mkLabel "EXPORT MODE" pad Y iW 18 fObj:CloneUI.fBold cObj:CloneUI.cHead); Y += 26
 	local chk_advSingle = CloneUI.mkCheck "Single Export" (pad+4) Y 180 chk:false
 	frm.controls.add chk_advSingle
+	Y += 28
+	local chk_singleSeparate = CloneUI.mkCheck "Separate USD Files" (pad+24) Y 190 chk:false
+	chk_singleSeparate.Enabled = false
+	frm.controls.add chk_singleSeparate
 	Y += 38
 
 	frm.controls.add (CloneUI.mkSep pad Y iW); Y += 12
@@ -358,6 +388,7 @@ buttonText:"Clone PowerUSD UI"
 	fn onAdvancedSingleChanged s e =
 	(
 		local state = chk_advSingle.Checked
+		chk_singleSeparate.Enabled = state
 		chk_autoAssemble.Enabled = not state
 		chk_rootPrim.Enabled = not state
 		edt_defaultPrim.Enabled = (not state) and chk_rootPrim.Checked
@@ -504,7 +535,10 @@ buttonText:"Clone PowerUSD UI"
 
 		if chk_advSingle.Checked then
 		(
-			exportSets = ::buildAdvancedSingleExportSets rawSelection outDir writeMetadata:false useLayers:useLayers
+			if chk_singleSeparate.Checked then
+				exportSets = ::buildAdvancedSingleSeparateExportSets rawSelection outDir writeMetadata:false useLayers:useLayers
+			else
+				exportSets = ::buildAdvancedSingleExportSets rawSelection outDir writeMetadata:false useLayers:useLayers
 		)
 		else
 		(
@@ -560,3 +594,4 @@ buttonText:"Clone PowerUSD UI"
 )
 
 PowerUSD_InstallStartupLoader()
+PowerUSD_tryLoadEntryScript "register_chasers.ms"

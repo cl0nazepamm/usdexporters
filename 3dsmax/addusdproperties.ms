@@ -91,7 +91,8 @@ fn AddUSD_installFiles selfFileName extraFiles:#() =
 		)
 	)
 
-	if copiedSelf do ::g_CloneTools_ScriptsDir = targetDir
+	-- Keep g_CloneTools_ScriptsDir pointing at the source file that was run.
+	-- The startup loader stores the installed copy separately as fallback.
 	copiedSelf
 )
 

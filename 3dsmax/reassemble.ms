@@ -1,13 +1,83 @@
 -- Author: Clone.
 
 global g_CloneTools_ScriptsDir
+global CloneUI
+
+fn Reassemble_uniqueAppend arr value =
+(
+	if value == undefined or value == "" do return arr
+	local v = value as string
+	for e in arr where (toLower (e as string)) == (toLower v) do return arr
+	append arr v
+	arr
+)
+
+fn Reassemble_detectSourceDir selfFileName =
+(
+	local candidates = #()
+	if ::g_CloneTools_ScriptsDir != undefined and ::g_CloneTools_ScriptsDir != "" do
+		Reassemble_uniqueAppend candidates ::g_CloneTools_ScriptsDir
+
+	local pA = try(getSourceFileName())catch("")
+	if pA != undefined and pA != "" do Reassemble_uniqueAppend candidates (getFilenamePath pA)
+
+	local pB = try(sourceFileName)catch("")
+	if pB != undefined and pB != "" do Reassemble_uniqueAppend candidates (getFilenamePath pB)
+
+	local pC = try(sysInfo.currentdir)catch("")
+	if pC != undefined and pC != "" do Reassemble_uniqueAppend candidates pC
+
+	Reassemble_uniqueAppend candidates ((getDir #userScripts) + "\\CloneTools\\")
+
+	for dir in candidates do (
+		local direct = dir + selfFileName
+		local fromChasers = dir + "cloneTools\\" + selfFileName
+		if doesFileExist direct do return dir
+		if doesFileExist fromChasers do return (dir + "cloneTools\\")
+	)
+	undefined
+)
+
+fn Reassemble_findSourceFile sourceDir fileName =
+(
+	local p1 = sourceDir + fileName
+	if doesFileExist p1 do return p1
+	local p2 = sourceDir + "cloneTools\\" + fileName
+	if doesFileExist p2 do return p2
+	""
+)
+
+fn Reassemble_copyFile sourcePath destPath =
+(
+	if sourcePath == undefined or sourcePath == "" do return false
+	if destPath == undefined or destPath == "" do return false
+	if not doesFileExist sourcePath do return false
+
+	if (toLower sourcePath) == (toLower destPath) do return true
+	if doesFileExist destPath do deleteFile destPath
+	copyFile sourcePath destPath
+)
 
 fn PowerUSD_getScriptsDir =
 (
-	if g_CloneTools_ScriptsDir != undefined and g_CloneTools_ScriptsDir != "" then
-		g_CloneTools_ScriptsDir
-	else
-		((getDir #userScripts) + "/CloneTools/")
+	-- The repo stores helpers in 3dsmax\cloneTools, while the installed
+	-- fallback flattens them under <userScripts>\CloneTools.
+	local sentinel = "Clone_USD_HierarchyBuilder.ms"
+	local candidates = #()
+	if ::g_CloneTools_ScriptsDir != undefined and ::g_CloneTools_ScriptsDir != "" do
+	(
+		append candidates ::g_CloneTools_ScriptsDir
+		append candidates (::g_CloneTools_ScriptsDir + "cloneTools\\")
+		append candidates (::g_CloneTools_ScriptsDir + "cloneTools/")
+	)
+	append candidates ((getDir #userScripts) + "\\CloneTools\\")
+
+	local chosen = undefined
+	for c in candidates while chosen == undefined do
+		if doesFileExist (c + sentinel) do chosen = c
+
+	if chosen == undefined then ((getDir #userScripts) + "\\CloneTools\\")
+	else chosen
 )
 
 fn Reassemble_escapePath path = (substituteString path "\\" "\\\\")
@@ -28,26 +98,38 @@ fn Reassemble_isWritableDir dirPath =
 fn Reassemble_InstallStartupLoader =
 (
 	local selfFile = "reassemble.ms"
-
-	local sourceFile = try(getSourceFileName())catch("")
-	if sourceFile == undefined or sourceFile == "" do return false
+	local deps = #(
+		"Clone_USD_HierarchyBuilder.ms",
+		"Clone_USD_CleanStruct.py",
+		"Clone_USD_usdWrapper.py",
+		"Clone_USD_PropertiesChaser.py",
+		"Clone_USD_MaterialXSidecar.py",
+		"Clone_USD_ExportBridge.py",
+		"Clone_USD_StageAssembler.py",
+		"Clone_USD_AttributeDef.ms",
+		"CloneUI.ms"
+	)
+	local sourceDir = Reassemble_detectSourceDir selfFile
+	if sourceDir == undefined or sourceDir == "" do return false
+	local sourceFile = Reassemble_findSourceFile sourceDir selfFile
+	if sourceFile == "" do return false
 
 	local targetDir = (getDir #userScripts) + "\\CloneTools\\"
 	try(makeDir targetDir)catch()
 	local destPath = targetDir + selfFile
-	if (toLower sourceFile) != (toLower destPath) do (
-		if doesFileExist destPath do deleteFile destPath
-		copyFile sourceFile destPath
+	Reassemble_copyFile sourceFile destPath
+
+	for dep in deps do (
+		local src = Reassemble_findSourceFile sourceDir dep
+		if src != "" do Reassemble_copyFile src (targetDir + dep)
 	)
-	local sourceDir = getFilenamePath sourceFile
-	if doesFileExist (sourceDir + "CloneUI.ms") do copyFile (sourceDir + "CloneUI.ms") (targetDir + "CloneUI.ms")
-	if doesFileExist (sourceDir + "icons\\powerusd_logo.png") do copyFile (sourceDir + "icons\\powerusd_logo.png") (targetDir + "powerusd_logo.png")
+	if doesFileExist (sourceDir + "icons\\powerusd_logo.png") do Reassemble_copyFile (sourceDir + "icons\\powerusd_logo.png") (targetDir + "powerusd_logo.png")
 
 	local userMacrosDir = getDir #userMacros
 	if userMacrosDir != undefined and userMacrosDir != "" and Reassemble_isWritableDir userMacrosDir do (
 		local mcrPath = userMacrosDir + "\\Reassemble_CloneTools.mcr"
 		if doesFileExist mcrPath do deleteFile mcrPath
-		copyFile sourceFile mcrPath
+		Reassemble_copyFile sourceFile mcrPath
 	)
 
 	local startupDirs = #()
@@ -57,12 +139,27 @@ fn Reassemble_InstallStartupLoader =
 	local d2 = try(getDir #startupScripts)catch("")
 	if d2 != undefined and d2 != "" do append startupDirs d2
 
-	local escapedDest = Reassemble_escapePath destPath
+	local macroPaths = #()
+	Reassemble_uniqueAppend macroPaths sourceFile
+	Reassemble_uniqueAppend macroPaths destPath
+	local macroList = ""
+	for i = 1 to macroPaths.count do (
+		local comma = if i < macroPaths.count then "," else ""
+		macroList += ("\t\t\"" + (Reassemble_escapePath macroPaths[i]) + "\"" + comma + "\n")
+	)
+
 	local loaderScript =
 		"-- Auto-generated by PowerUSD Reassemble\n" +
 		"(\n" +
-		"\tlocal macrosPath = \"" + escapedDest + "\"\n" +
-		"\tif doesFileExist macrosPath do fileIn macrosPath quiet:true\n" +
+		"\tlocal macroPaths = #(\n" +
+		macroList +
+		"\t)\n" +
+		"\tfor p in macroPaths do (\n" +
+		"\t\tif doesFileExist p do (\n" +
+		"\t\t\tfileIn p quiet:true\n" +
+		"\t\t\texit\n" +
+		"\t\t)\n" +
+		"\t)\n" +
 		")\n"
 
 	for startupDir in startupDirs do (

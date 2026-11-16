@@ -26,8 +26,10 @@ def find_camera_sequence_json():
     for actor in all_actors:
         if actor.get_class().get_name() == "UsdStageActor":
             root_layer = actor.get_editor_property("root_layer")
-            if root_layer:
-                stage_dir = os.path.dirname(str(root_layer))
+            # root_layer is a FilePath struct; str() gives its struct text, not the path
+            layer_path = getattr(root_layer, "file_path", None) or (root_layer if isinstance(root_layer, str) else "")
+            if layer_path:
+                stage_dir = os.path.dirname(layer_path)
                 json_path = os.path.join(stage_dir, "_camera_sequence.json")
                 if os.path.isfile(json_path):
                     return json_path

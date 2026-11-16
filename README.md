@@ -107,7 +107,7 @@ The Clean Material Structure fixes MaxUSD's default material export to produce c
 
 ![Correct_Settings](docs/images/Correct_Settings.png)
 
-Don't export whole scene with animation enabled. Use single export mode and send animated stuff. Use reassembler if needed.
+Animation is sampled per export unit: a unit whose nodes have an animated transform, object or modifier is written over the scene's animation range, one sample per frame; every other unit is written at the current frame. The exporter sets the dialog's Time mode per file and restores it afterwards. Use reassembler if needed.
 
 ## Blender Exporter
 

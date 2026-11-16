@@ -35,6 +35,8 @@ global buildParentFolderPath
 global convertGroupsToDummies
 global exportMaterialXSidecarForNodes
 global exportUsdViaPythonBridge
+global isNodeAnimated
+global isExportSetAnimated
 global performBatchExport
 global g_PowerUSD_HierarchyBuilderDir
 
@@ -1174,12 +1176,37 @@ fn convertGroupsToDummies nodeArray =
 	)
 )
 
+-- True when the node's transform, base object or any modifier is animated.
+fn isNodeAnimated n =
+(
+	if not isValidNode n do return false
+	if (try (n.isAnimated) catch false) do return true
+	if (try (n.baseObject.isAnimated) catch false) do return true
+	for m in n.modifiers where (try (m.isAnimated) catch false) do return true
+	false
+)
+
+-- An export set is sampled over the time range only when one of its nodes is animated.
+-- Static sets export at the current frame, so their xformOps are not written as one
+-- time sample per frame.
+fn isExportSetAnimated nodes =
+(
+	if nodes == undefined do return false
+	for n in nodes where isNodeAnimated n do return true
+	false
+)
+
 -- Batch export a list of ExportNodeData sets to USD files
 fn performBatchExport exportSets outDir useOrigin useThumbnails startFrame endFrame fps useLegacyExport:false forceMaterialXSidecar:false inlineMaterialXIntoUsd:false referenceTextures:true =
 (
 	if exportSets.count > 0 then
 	(
 		local abortBatch = false
+
+		-- The legacy exportFile path takes its settings from USDExporter.UIOptions (the export
+		-- dialog's options). Its time settings are set per file below and restored afterwards.
+		local uiOpts = try (USDExporter.UIOptions) catch undefined
+		local savedTime = if uiOpts != undefined then #(uiOpts.TimeMode, uiOpts.StartFrame, uiOpts.EndFrame) else undefined
 
 		undo "Batch USD Export" on
 		(
@@ -1206,6 +1233,18 @@ fn performBatchExport exportSets outDir useOrigin useThumbnails startFrame endFr
 						local thumbPath = exportDir + "\\" + item.exportName + "_thumb.png"
 						local originalPos = [0, 0, 0]
 						local moved = false
+						local setAnimated = (endFrame > startFrame) and (isExportSetAnimated item.rootNodes)
+						local setEndFrame = if setAnimated then endFrame else startFrame
+						if uiOpts != undefined do
+						(
+							if setAnimated then
+							(
+								uiOpts.TimeMode = #frameRange
+								uiOpts.StartFrame = startFrame
+								uiOpts.EndFrame = endFrame
+							)
+							else uiOpts.TimeMode = #current
+						)
 
 						select item.rootNodes
 
@@ -1243,7 +1282,7 @@ fn performBatchExport exportSets outDir useOrigin useThumbnails startFrame endFr
 							)
 							else
 							(
-								result = exportUsdViaPythonBridge filePath item.rootNodes startFrame endFrame fps forceMaterialXSidecar:forceMaterialXSidecar inlineMaterialXIntoUsd:inlineMaterialXIntoUsd referenceTextures:referenceTextures
+								result = exportUsdViaPythonBridge filePath item.rootNodes startFrame setEndFrame fps forceMaterialXSidecar:forceMaterialXSidecar inlineMaterialXIntoUsd:inlineMaterialXIntoUsd referenceTextures:referenceTextures
 								if result == false and i == 1 do abortBatch = true
 							)
 
@@ -1266,6 +1305,15 @@ fn performBatchExport exportSets outDir useOrigin useThumbnails startFrame endFr
 					)
 				)
 			)
+		)
+
+		if savedTime != undefined do
+		(
+			try (
+				uiOpts.TimeMode = savedTime[1]
+				uiOpts.StartFrame = savedTime[2]
+				uiOpts.EndFrame = savedTime[3]
+			) catch ()
 		)
 
 		return (not abortBatch)
